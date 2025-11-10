@@ -1,0 +1,247 @@
+{
+    "id": 68063,
+    "parent_id": 0,
+    "status": "processing",
+    "currency": "ILS",
+    "version": "9.9.5",
+    "prices_include_tax": false,
+    "date_created": "2025-08-21T06:39:14",
+    "date_modified": "2025-08-21T06:39:57",
+    "discount_total": "0.00",
+    "discount_tax": "0.00",
+    "shipping_total": "0.00",
+    "shipping_tax": "0.00",
+    "cart_tax": "0.00",
+    "total": "19.90",
+    "total_tax": "0.00",
+    "customer_id": 6796,
+    "order_key": "wc_order_fEqQJ0dEAbrKV",
+    "billing": {
+        "first_name": "Yaron",
+        "last_name": "Molho",
+        "company": "",
+        "address_1": "12 רקפת",
+        "address_2": "",
+        "city": "גבע בנימין",
+        "state": "",
+        "postcode": "9063200",
+        "country": "IL",
+        "email": "yaronm@collanta.co.il",
+        "phone": "0586091202"
+    },
+    "shipping": {
+        "first_name": "",
+        "last_name": "",
+        "company": "",
+        "address_1": "",
+        "address_2": "",
+        "city": "",
+        "state": "",
+        "postcode": "",
+        "country": "",
+        "phone": ""
+    },
+    "payment_method": "yaadpay",
+    "payment_method_title": "תשלום מאובטח באשראי",
+    "transaction_id": "",
+    "customer_ip_address": "172.69.128.193",
+    "customer_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+    "created_via": "checkout",
+    "customer_note": "",
+    "date_completed": null,
+    "date_paid": "2025-08-21T06:39:49",
+    "cart_hash": "7dcca7d3cf476424d64e8fcd5ae1fba2",
+    "number": "68063",
+    "meta_data": [
+        {
+            "id": 253,
+            "key": "_fineline_source_code",
+            "value": "1234"
+        },
+        {
+            "id": 254,
+            "key": "_fineline_source_name",
+            "value": "yaron"
+        },
+        {
+            "id": 255,
+            "key": "_fineline_source_name_hebrew",
+            "value": "ירון"
+        },
+        {
+            "id": 269,
+            "key": "_ga_tracked",
+            "value": "1"
+        },
+        {
+            "id": 267,
+            "key": "_wc_order_attribution_device_type",
+            "value": "Desktop"
+        },
+        {
+            "id": 260,
+            "key": "_wc_order_attribution_referrer",
+            "value": "https://fineline.org.il/?__cf_chl_tk=F9YyrXgfJ6rTRG3n2Lelc2D90xIYRLrB44SZe4HvpPg-1755750938-1.0.1.1-EN0CwJFutFmUfDl57r9chQX7c0YdK.flLN4D075aVZ0"
+        },
+        {
+            "id": 265,
+            "key": "_wc_order_attribution_session_count",
+            "value": "1"
+        },
+        {
+            "id": 262,
+            "key": "_wc_order_attribution_session_entry",
+            "value": "https://fineline.org.il/login/"
+        },
+        {
+            "id": 264,
+            "key": "_wc_order_attribution_session_pages",
+            "value": "7"
+        },
+        {
+            "id": 263,
+            "key": "_wc_order_attribution_session_start_time",
+            "value": "2025-08-21 04:35:44"
+        },
+        {
+            "id": 259,
+            "key": "_wc_order_attribution_source_type",
+            "value": "typein"
+        },
+        {
+            "id": 266,
+            "key": "_wc_order_attribution_user_agent",
+            "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
+        },
+        {
+            "id": 261,
+            "key": "_wc_order_attribution_utm_source",
+            "value": "(direct)"
+        },
+        {
+            "id": 252,
+            "key": "is_vat_exempt",
+            "value": "no"
+        },
+        {
+            "id": 268,
+            "key": "yaad_credit_card_payment",
+            "value": "Id=323735894&CCode=0&Amount=19.9&ACode=0272703&Order=68063&Fild1=YaronMolho&Fild2=&Fild3=&Sign=7b7709f1e035d2b87f3627670547e74d9a7fecdd74615d0156a0cf7b94bf690a&Bank=2&Payments=1&UserId=L4258784304&Brand=1&Issuer=1&L4digit=5614&street=12&city=&zip=9063200&cell=0586091202&Coin=1&Tmonth=12&Tyear=2025&Info=68063&errMsg=(0)&Hesh=0&TransType=&UID=25082107394808822867136&SpType=0&BinCard=532610"
+        },
+        {
+            "id": 258,
+            "key": "yaad_query_string",
+            "value": "Amount=19.90&BOF=True&ClientLName=Molho&ClientName=Yaron&Coin=1&Info=%D7%94%D7%96%D7%9E%D7%A0%D7%94%2068063&Masof=0010288021&MoreData=True&Order=68063&PageLang=HEB&Pritim=False&SendHesh=False&Sign=True&Tash=1&UTF8=True&action=pay&cell=0586091202&city=%D7%92%D7%91%D7%A2%20%D7%91%D7%A0%D7%99%D7%9E%D7%99%D7%9F&email=yaronm%40collanta.co.il&sendemail=False&street=12%20%D7%A8%D7%A7%D7%A4%D7%AA%20&tmp=6&zip=9063200&signature=e33c55ffb41af9a768fa4c92295219ade2198fca1ddabb97f9fee2fa09a4436a"
+        }
+    ],
+    "line_items": [
+        {
+            "id": 65817,
+            "name": "חולצת אריג שיבוץ אנגלי - כחול נייבי, 8",
+            "product_id": 67483,
+            "variation_id": 67496,
+            "quantity": 1,
+            "tax_class": "",
+            "subtotal": "19.90",
+            "subtotal_tax": "0.00",
+            "total": "19.90",
+            "total_tax": "0.00",
+            "taxes": [],
+            "meta_data": [
+                {
+                    "id": 552097,
+                    "key": "pa_color",
+                    "value": "כחול-נייבי",
+                    "display_key": "צבע",
+                    "display_value": "כחול נייבי"
+                },
+                {
+                    "id": 552098,
+                    "key": "pa_size",
+                    "value": "8",
+                    "display_key": "מידה",
+                    "display_value": "8"
+                },
+                {
+                    "id": 552102,
+                    "key": "_reduced_stock",
+                    "value": "1",
+                    "display_key": "_reduced_stock",
+                    "display_value": "1"
+                }
+            ],
+            "sku": "4057",
+            "price": 19.9,
+            "image": {
+                "id": 0,
+                "src": ""
+            },
+            "parent_name": "חולצת אריג שיבוץ אנגלי"
+        }
+    ],
+    "tax_lines": [],
+    "shipping_lines": [],
+    "fee_lines": [],
+    "coupon_lines": [
+        {
+            "id": 65818,
+            "code": "1234",
+            "discount": "0",
+            "discount_tax": "0",
+            "meta_data": [
+                {
+                    "id": 552101,
+                    "key": "coupon_info",
+                    "value": "[66258,\"1234\",null,0]",
+                    "display_key": "coupon_info",
+                    "display_value": "[66258,\"1234\",null,0]"
+                }
+            ],
+            "discount_type": "fixed_cart",
+            "nominal_amount": 0,
+            "free_shipping": false
+        }
+    ],
+    "refunds": [],
+    "payment_url": "https://fineline.org.il/checkout/order-pay/68063/?pay_for_order=true&key=wc_order_fEqQJ0dEAbrKV",
+    "is_editable": false,
+    "needs_payment": false,
+    "needs_processing": true,
+    "date_created_gmt": "2025-08-21T04:39:14",
+    "date_modified_gmt": "2025-08-21T04:39:57",
+    "date_completed_gmt": null,
+    "date_paid_gmt": "2025-08-21T04:39:49",
+    "currency_symbol": "₪",
+    "_links": {
+        "self": [
+            {
+                "href": "https://fineline.org.il/wp-json/wc/v3/orders/68063",
+                "targetHints": {
+                    "allow": [
+                        "GET",
+                        "POST",
+                        "PUT",
+                        "PATCH",
+                        "DELETE"
+                    ]
+                }
+            }
+        ],
+        "collection": [
+            {
+                "href": "https://fineline.org.il/wp-json/wc/v3/orders"
+            }
+        ],
+        "email_templates": [
+            {
+                "embeddable": true,
+                "href": "https://fineline.org.il/wp-json/wc/v3/orders/68063/actions/email_templates"
+            }
+        ],
+        "customer": [
+            {
+                "href": "https://fineline.org.il/wp-json/wc/v3/customers/6796"
+            }
+        ]
+    }
+}

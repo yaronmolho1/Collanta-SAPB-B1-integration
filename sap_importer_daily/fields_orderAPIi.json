@@ -1,0 +1,103 @@
+// קריאה ראשונה לעדכון/יצירת לקוח
+
+
+
+{
+    "CardCode": "6796", 
+    "CardName": "Yaron Molho",
+    "Series": 71,
+    "CardType": "cCustomer",
+    "GroupCode": 100, 
+    "Phone1": "0586091202",
+    "PriceListNum": 1, 
+    "SalesPersonCode": 1, 
+    "EmailAddress": "yaronm@collanta.co.il",
+    "ShipToDefault": "Yaron Molho - גבע בנימין",
+    "VatIDNum": "",
+    "BPAddresses": [
+        {
+            "AddressName": "Yaron Molho - גבע בנימין",
+            "Street": "12 רקפת",
+            "ZipCode": "9063200",
+            "City": "גבע בנימין",
+            "Country": "IL",
+            "AddressType": "bo_ShipTo",
+            "StreetNo": ""
+        }
+    ],
+    "ContactEmployees": [
+        {
+            "Name": "Yaron Molho",
+            "MobilePhone": "0586091202",
+            "Active": "tYES",
+            "FirstName": "Yaron",
+            "LastName": "Molho",
+            "E_Mail": "yaronm@collanta.co.il"
+        }
+    ]
+}
+
+
+
+
+{
+    "Order": {
+        "DocDueDate": "2025-01-21T06:39:14Z",
+        "CardCode": "6796",
+        "DocTotal": 19.90,
+        "Reference1": "68063",
+        "Comments": "WooCommerce Order #68063 from yaronm@collanta.co.il",
+        "JournalMemo": "Sales Orders - 6796",
+        "SalesPersonCode": 2,
+        "Series": 8,
+        "DocumentsOwner": 1,
+        "DocumentLines": [
+            {
+                "ItemCode": "4057",
+                "Quantity": 1.0,
+                "Price": 19.90,
+                "BarCode": "",
+                "LineTotal": 19.90
+            }
+        ],
+        
+    },
+    "Invoice": {
+        "DocumentLines": [
+            {
+                "BaseType": 17,
+                "BaseEntry": 0,
+                "BaseLine": 0
+            }
+        ]
+    },
+    "Payment": {
+        "CardCode": "6796",
+        "Reference1": "68063",
+        "JournalRemarks": "Incoming Payments - 6796",
+        "Series": 81,
+        "PaymentInvoices": [
+            {
+                "DocEntry": 0,
+                "InvoiceType": "it_Invoice",
+            }
+        ],
+        "PaymentCreditCards": [
+            {
+                "CreditCard": 1,
+                "CreditAcct": "1001",
+                "CreditCardNumber": "5614",
+                "CardValidUntil": "2025-12-01T00:00:00Z",
+                "VoucherNum": "WC_ORDER_68063",
+                "PaymentMethodCode": 2,
+                "NumOfPayments": 1,
+                "FirstPaymentDue": "2025-01-21T06:39:14Z",
+                "FirstPaymentSum": 19.90,
+                "CreditSum": 19.90,
+                "CreditType": "cr_Regular",
+                "SplitPayments": "tNO",
+                
+            }
+        ]
+    }
+}
