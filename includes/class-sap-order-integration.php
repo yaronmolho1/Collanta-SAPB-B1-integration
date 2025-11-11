@@ -482,40 +482,41 @@ function sap_handle_order_integration($order_id) {
         return;
     }
 
-    // CRITICAL FIX: Validate payment completion for Yaad payments
+    // CRITICAL FIX: MANDATORY Yaad payment validation - NO order can be sent to SAP without valid Yaad payment token
     $payment_method = $order->get_payment_method();
-    if ($payment_method === 'yaadpay') {
-        $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+    $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+    
+    // Block if no Yaad payment data exists at all
+    if (empty($yaad_payment_data)) {
+        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed). Payment method: ' . $payment_method);
         
-        if (empty($yaad_payment_data)) {
-            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed)');
-            
-            if (class_exists('SAP_Sync_Logger')) {
-                SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed");
-            }
-            
-            $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data)');
-            return;
+        if (class_exists('SAP_Sync_Logger')) {
+            SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed. No order can be sent to SAP without Yaad payment token.");
         }
         
-        // Parse Yaad payment data to check CCode (0 = success)
-        parse_str($yaad_payment_data, $yaad_parsed);
-        $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
-        $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
-        
-        if ($ccode !== '0' || empty($acode)) {
-            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed (CCode: ' . $ccode . ', ACode: ' . $acode . ')');
-            
-            if (class_exists('SAP_Sync_Logger')) {
-                SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed - CCode: {$ccode}, ACode: {$acode}");
-            }
-            
-            $order->add_order_note('SAP Integration blocked: Payment failed (CCode: ' . $ccode . ')');
-            return;
-        }
+        $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data). Orders can only be sent to SAP after successful Yaad payment processing.');
+        return;
     }
-
-    error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed');
+    
+    // Parse Yaad payment data to check CCode (0 = success) and ACode (approval code)
+    parse_str($yaad_payment_data, $yaad_parsed);
+    $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
+    $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
+    
+    // Block if payment was not successful
+    if ($ccode !== '0' || empty($acode)) {
+        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'empty') . ')');
+        
+        if (class_exists('SAP_Sync_Logger')) {
+            SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed or incomplete - CCode: {$ccode}, ACode: " . ($acode ?: 'empty') . ". CCode must be '0' and ACode must exist.");
+        }
+        
+        $order->add_order_note('SAP Integration blocked: Payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'missing') . '). Orders can only be sent to SAP after successful payment.');
+        return;
+    }
+    
+    // Log successful validation
+    error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
 
     // Check if order should be synced (prevents duplicates and manages retries)
     // RETRYING COMMENTED OUT - Check only for success/in_progress, skip retry logic
