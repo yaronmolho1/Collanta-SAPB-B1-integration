@@ -666,8 +666,63 @@ function sap_ensure_term_exists($taxonomy, $term_name, $term_slug) {
 }
 
 /**
+ * SAP API PATCH request
+ * Used for updating SAP items with WooCommerce IDs
+ *
+ * @param string $endpoint API endpoint
+ * @param array $data Request data
+ * @param string $token SAP auth token
+ * @return array|WP_Error Response data or error
+ */
+function sap_api_patch($endpoint, $data = [], $token = null) {
+    $url = trailingslashit(SAP_API_BASE) . ltrim($endpoint, '/');
+    $headers = [
+        'Content-Type' => 'application/json',
+        'Accept' => 'application/json',
+    ];
+
+    if ($token) {
+        $headers['Authorization'] = 'Bearer ' . $token;
+    }
+
+    $args = [
+        'method'      => 'PATCH',
+        'headers'     => $headers,
+        'body'        => wp_json_encode($data),
+        'timeout'     => 30,
+        'data_format' => 'body',
+        'sslverify'   => false,
+    ];
+
+    $response = wp_remote_request($url, $args);
+
+    if (is_wp_error($response)) {
+        error_log('SAP API Patch Error (' . $endpoint . '): ' . $response->get_error_message());
+        return new WP_Error('api_error', 'SAP API Patch Error (' . $endpoint . '): ' . $response->get_error_message());
+    }
+
+    $body = wp_remote_retrieve_body($response);
+    $http_code = wp_remote_retrieve_response_code($response);
+    
+    if ($http_code !== 200 && $http_code !== 204) {
+        error_log("SAP API HTTP Error {$http_code} for {$endpoint}: " . substr($body, 0, 500));
+        return new WP_Error('sap_api_http_error', "HTTP {$http_code} for {$endpoint}");
+    }
+
+    // Parse response if there's a body (200), or return true for no content (204)
+    if (empty($body)) {
+        return ['success' => true];
+    }
+    
+    return sap_parse_api_response($body, $endpoint);
+}
+
+/**
  * Update SAP item with WooCommerce IDs
- * TODO: Recheck endpoint - currently using Items/update, verify correct endpoint and payload structure
+ * 
+ * Uses endpoint: Items/{itemcode} with PATCH method
+ * For variations: GroupID = parent ID, ItemID = variation ID
+ * For simple products: GroupID = product ID, ItemID = product ID
  *
  * @param string $item_code SAP ItemCode
  * @param int $site_group_id WooCommerce parent/product ID
@@ -677,12 +732,14 @@ function sap_ensure_term_exists($taxonomy, $term_name, $term_slug) {
  */
 function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) {
     $update_data = [
-        'ItemCode' => $item_code,
         'U_SiteGroupID' => (string)$site_group_id,
         'U_SiteItemID' => (string)$site_item_id
     ];
     
-    $response = sap_api_post('Items/update', $update_data, $token);
+    // Endpoint: Items/{itemcode}
+    $endpoint = 'Items/' . $item_code;
+    
+    $response = sap_api_patch($endpoint, $update_data, $token);
     
     if (is_wp_error($response)) {
         error_log("SAP Creator: Failed to update SAP for {$item_code}: " . $response->get_error_message());

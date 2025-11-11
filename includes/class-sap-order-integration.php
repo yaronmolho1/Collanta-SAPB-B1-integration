@@ -660,7 +660,7 @@ function sap_handle_order_integration($order_id) {
                 "Street"      => $billing_address_1,
                 "ZipCode"     => $billing_postcode,
                 "City"        => $billing_city,
-                "Country"     => "IL", // Note: Yaron set this to IL permanently
+                "Country"     => "IL", 
                 "AddressType" => "bo_ShipTo",
                 "StreetNo"    => $billing_street_no,
             ],
