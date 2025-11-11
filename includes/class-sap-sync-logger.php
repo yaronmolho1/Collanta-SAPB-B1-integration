@@ -144,46 +144,129 @@ class SAP_Sync_Logger {
     }
     
     /**
-     * Log sync failure - NO RETRIES
+     * Log sync failure with intelligent retry logic
+     * Maximum 3 attempts (1 initial + 2 retries) with 5-minute intervals
+     * CRITICAL: Will NOT schedule retry if order is currently in_progress
      */
     public static function log_sync_failure($order_id, $error_message, $sap_response = null) {
         global $wpdb;
         
         $table_name = $wpdb->prefix . self::$table_name;
         
-        // Mark as permanently failed immediately - no retries
-        $wpdb->update(
-            $table_name,
-            [
-                'sync_status' => 'permanently_failed',
-                'last_attempt_time' => current_time('mysql'),
-                'error_message' => $error_message,
-                'sap_response' => $sap_response ? json_encode($sap_response) : null,
-                'next_retry_time' => null
-            ],
-            ['order_id' => $order_id],
-            ['%s', '%s', '%s', '%s', '%s'],
-            ['%d']
-        );
+        // Get current record to check attempt number and status
+        $existing = $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table_name WHERE order_id = %d",
+            $order_id
+        ));
         
-        error_log("SAP Sync Logger: Order $order_id failed permanently - no retries");
+        $attempt_number = $existing ? (int)$existing->attempt_number : 1;
+        $max_attempts = 3; // 1 initial + 2 retries = 3 total attempts
         
-        // Send immediate Telegram notification
-        self::send_telegram_failure_alert($order_id, $error_message, 1, 1);
+        error_log("SAP Sync Logger: Order $order_id failed - Attempt $attempt_number of $max_attempts");
         
-        return 'permanently_failed';
+        // CRITICAL: Check if another process is currently syncing this order
+        if ($existing && $existing->sync_status === 'in_progress') {
+            error_log("SAP Sync Logger: CRITICAL - Order $order_id is still marked as in_progress by another process. Not scheduling retry to prevent race condition.");
+            // Don't update status or schedule retry if another process is working on it
+            return 'in_progress';
+        }
+        
+        // Check if we should retry or mark as permanently failed
+        if ($attempt_number < $max_attempts) {
+            // Schedule retry - 5 minutes from now
+            $next_retry_time = date('Y-m-d H:i:s', strtotime('+5 minutes'));
+            
+            $wpdb->update(
+                $table_name,
+                [
+                    'sync_status' => 'retry_pending',
+                    'last_attempt_time' => current_time('mysql'),
+                    'error_message' => $error_message,
+                    'sap_response' => $sap_response ? json_encode($sap_response) : null,
+                    'next_retry_time' => $next_retry_time
+                ],
+                ['order_id' => $order_id],
+                ['%s', '%s', '%s', '%s', '%s'],
+                ['%d']
+            );
+            
+            error_log("SAP Sync Logger: Order $order_id scheduled for retry at $next_retry_time (Attempt " . ($attempt_number + 1) . " of $max_attempts)");
+            
+            // Schedule the retry using Action Scheduler (prevents duplicate jobs)
+            $job_id = self::schedule_retry($order_id, $next_retry_time);
+            
+            // Send Telegram notification about retry
+            if ($job_id) {
+                self::send_telegram_retry_alert($order_id, $error_message, $attempt_number, $max_attempts, $next_retry_time);
+            }
+            
+            // Add order note about retry
+            $order = wc_get_order($order_id);
+            if ($order) {
+                $order->add_order_note(
+                    sprintf(
+                        'SAP Sync failed (Attempt %d of %d). Retry scheduled for %s. Error: %s',
+                        $attempt_number,
+                        $max_attempts,
+                        $next_retry_time,
+                        substr($error_message, 0, 100)
+                    )
+                );
+            }
+            
+            return 'retry_pending';
+        } else {
+            // Max attempts reached - permanently failed
+            $wpdb->update(
+                $table_name,
+                [
+                    'sync_status' => 'permanently_failed',
+                    'last_attempt_time' => current_time('mysql'),
+                    'error_message' => $error_message,
+                    'sap_response' => $sap_response ? json_encode($sap_response) : null,
+                    'next_retry_time' => null
+                ],
+                ['order_id' => $order_id],
+                ['%s', '%s', '%s', '%s', '%s'],
+                ['%d']
+            );
+            
+            error_log("SAP Sync Logger: Order $order_id permanently failed after $attempt_number attempts");
+            
+            // Send Telegram notification only on permanent failure
+            self::send_telegram_failure_alert($order_id, $error_message, $attempt_number, $max_attempts);
+            
+            // Add order note about permanent failure
+            $order = wc_get_order($order_id);
+            if ($order) {
+                $order->add_order_note(
+                    sprintf(
+                        'SAP Sync PERMANENTLY FAILED after %d attempts. Manual intervention required. Last error: %s',
+                        $attempt_number,
+                        substr($error_message, 0, 100)
+                    )
+                );
+            }
+            
+            return 'permanently_failed';
+        }
     }
     
     /**
-     * Check if order should be synced (prevents duplicates) - NO RETRIES
+     * Check if order should be synced (prevents duplicates and manages retries)
+     * CRITICAL: Blocks automatic retries for in_progress and success orders
+     * 
+     * @param int $order_id Order ID to check
+     * @param bool $is_manual_retry Whether this is a manual retry from admin (default: false)
+     * @return bool True if order should sync, false otherwise
      */
-    public static function should_sync_order($order_id) {
+    public static function should_sync_order($order_id, $is_manual_retry = false) {
         global $wpdb;
         
         $table_name = $wpdb->prefix . self::$table_name;
         
         $sync_record = $wpdb->get_row($wpdb->prepare(
-            "SELECT sync_status FROM $table_name WHERE order_id = %d",
+            "SELECT sync_status, next_retry_time, attempt_number FROM $table_name WHERE order_id = %d",
             $order_id
         ));
         
@@ -191,12 +274,143 @@ class SAP_Sync_Logger {
             return true; // New order, should sync
         }
         
-        // Don't sync if already successful, in progress, or failed
-        if (in_array($sync_record->sync_status, ['success', 'in_progress', 'permanently_failed', 'blocked'])) {
+        // CRITICAL: NEVER allow automatic retry if order is in_progress
+        if ($sync_record->sync_status === 'in_progress') {
+            error_log("SAP Sync Logger: BLOCKED - Order $order_id is currently in_progress, no retries allowed (manual: " . ($is_manual_retry ? 'YES' : 'NO') . ")");
             return false;
         }
         
-        return true; // Should sync
+        // CRITICAL: NEVER allow automatic retry if order is successful
+        if ($sync_record->sync_status === 'success') {
+            if ($is_manual_retry) {
+                // Manual retry on success requires explicit confirmation (handled in admin interface)
+                error_log("SAP Sync Logger: Order $order_id is successful - manual retry requested (requires confirmation)");
+                return true; // Allow manual retry after confirmation
+            } else {
+                // Block automatic retry on successful orders
+                error_log("SAP Sync Logger: BLOCKED - Order $order_id is already successful, automatic retry not allowed");
+                return false;
+            }
+        }
+        
+        // Never retry if permanently failed or blocked
+        if (in_array($sync_record->sync_status, ['permanently_failed', 'blocked'])) {
+            if ($is_manual_retry) {
+                error_log("SAP Sync Logger: Order $order_id is {$sync_record->sync_status} - allowing manual retry");
+                return true; // Allow manual retry for failed/blocked orders
+            }
+            error_log("SAP Sync Logger: BLOCKED - Order $order_id is {$sync_record->sync_status}, automatic retry not allowed");
+            return false;
+        }
+        
+        // For retry_pending status, only allow if retry time has been reached
+        if ($sync_record->sync_status === 'retry_pending') {
+            if (!empty($sync_record->next_retry_time)) {
+                $next_retry_timestamp = strtotime($sync_record->next_retry_time);
+                $now = current_time('timestamp');
+                
+                // Only allow retry if scheduled time has passed
+                if ($now >= $next_retry_timestamp) {
+                    error_log("SAP Sync Logger: Order $order_id retry time reached, allowing sync");
+                    return true;
+                } else {
+                    $seconds_left = $next_retry_timestamp - $now;
+                    error_log("SAP Sync Logger: Order $order_id retry scheduled in {$seconds_left} seconds, blocking sync");
+                    return false;
+                }
+            }
+        }
+        
+        return true; // Default - allow sync
+    }
+    
+    /**
+     * Schedule retry using Action Scheduler (prevents duplicate jobs)
+     * 
+     * @param int $order_id Order ID to retry
+     * @param string $next_retry_time MySQL datetime for next retry
+     */
+    private static function schedule_retry($order_id, $next_retry_time) {
+        // Check if Action Scheduler is available
+        if (!function_exists('as_schedule_single_action') || !class_exists('ActionScheduler')) {
+            error_log("SAP Sync Logger: Action Scheduler not available, cannot schedule retry for order $order_id");
+            return false;
+        }
+        
+        // Check if retry is already scheduled for this order (prevent duplicates)
+        $existing_retry = as_get_scheduled_actions([
+            'hook' => 'sap_retry_order_integration',
+            'args' => ['order_id' => $order_id],
+            'status' => 'pending',
+            'per_page' => 1
+        ]);
+        
+        if (!empty($existing_retry)) {
+            error_log("SAP Sync Logger: Retry already scheduled for order $order_id, skipping duplicate");
+            return false;
+        }
+        
+        // Schedule the retry
+        $retry_timestamp = strtotime($next_retry_time);
+        $job_id = as_schedule_single_action(
+            $retry_timestamp,
+            'sap_retry_order_integration',
+            ['order_id' => $order_id],
+            'sap_order_retries'
+        );
+        
+        if ($job_id) {
+            error_log("SAP Sync Logger: Retry scheduled for order $order_id at $next_retry_time (Job ID: $job_id)");
+            return $job_id;
+        } else {
+            error_log("SAP Sync Logger: Failed to schedule retry for order $order_id");
+            return false;
+        }
+    }
+    
+    /**
+     * Process retry for order integration
+     * Called by Action Scheduler
+     * 
+     * @param int $order_id Order ID to retry
+     */
+    public static function process_retry($order_id) {
+        error_log("SAP Sync Logger: Processing scheduled retry for order $order_id");
+        
+        // Validate order still exists and has processing status
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            error_log("SAP Sync Logger: Order $order_id not found, cancelling retry");
+            return;
+        }
+        
+        if ($order->get_status() !== 'processing') {
+            error_log("SAP Sync Logger: Order $order_id status is '" . $order->get_status() . "', not processing - cancelling retry");
+            self::log_sync_blocked($order_id, "Retry cancelled - Order status changed to '" . $order->get_status() . "'");
+            return;
+        }
+        
+        // Validate payment data still exists
+        $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+        if (empty($yaad_payment_data)) {
+            error_log("SAP Sync Logger: Order $order_id missing payment data, cancelling retry");
+            self::log_sync_blocked($order_id, "Retry cancelled - Missing yaad_credit_card_payment data");
+            return;
+        }
+        
+        // Check if order should still be synced (validates retry conditions)
+        if (!self::should_sync_order($order_id)) {
+            error_log("SAP Sync Logger: Order $order_id should not be synced at this time, skipping retry");
+            return;
+        }
+        
+        // Call the main order integration function
+        if (function_exists('sap_handle_order_integration')) {
+            error_log("SAP Sync Logger: Executing retry for order $order_id");
+            sap_handle_order_integration($order_id);
+        } else {
+            error_log("SAP Sync Logger: Order integration function not available for retry of order $order_id");
+        }
     }
     
     /**
@@ -290,6 +504,35 @@ class SAP_Sync_Logger {
     }
     
     /**
+     * Send Telegram retry alert
+     */
+    private static function send_telegram_retry_alert($order_id, $error_message, $attempt_number, $max_attempts, $next_retry_time) {
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return;
+        }
+        
+        $customer_name = trim($order->get_billing_first_name() . ' ' . $order->get_billing_last_name());
+        $customer_phone = $order->get_billing_phone();
+        $customer_email = $order->get_billing_email();
+        $order_total = $order->get_total();
+        
+        $message = "⚠️ SAP Sync Failed - Retry Scheduled\n\n";
+        $message .= "Order #$order_id\n";
+        $message .= "Customer: $customer_name\n";
+        $message .= "Phone: $customer_phone\n";
+        $message .= "Email: $customer_email\n";
+        $message .= "Amount: ₪" . number_format($order_total, 2) . "\n\n";
+        $message .= "⚠️ Error: " . substr($error_message, 0, 200) . "\n\n";
+        $message .= "🔄 Retry Status:\n";
+        $message .= "Attempt {$attempt_number} of {$max_attempts} failed\n";
+        $message .= "Next retry: {$next_retry_time}\n";
+        $message .= "Remaining attempts: " . ($max_attempts - $attempt_number);
+        
+        self::send_telegram_message($message);
+    }
+    
+    /**
      * Send Telegram failure alert
      */
     private static function send_telegram_failure_alert($order_id, $error_message, $attempt_number, $max_attempts) {
@@ -310,7 +553,8 @@ class SAP_Sync_Logger {
         $message .= "Email: $customer_email\n";
         $message .= "Amount: ₪" . number_format($order_total, 2) . "\n\n";
         $message .= "❌ Error: " . substr($error_message, 0, 200) . "\n\n";
-        $message .= "Manual intervention required - no retries";
+        $message .= "🚫 All {$max_attempts} attempts failed\n";
+        $message .= "Manual intervention required";
         
         self::send_telegram_message($message);
     }
@@ -344,6 +588,92 @@ class SAP_Sync_Logger {
             error_log('Telegram notification failed: ' . $response->get_error_message());
         } else {
             error_log('Telegram notification sent successfully for message: ' . substr($message, 0, 100));
+        }
+    }
+    
+    /**
+     * Get sync status for an order
+     * 
+     * @param int $order_id Order ID
+     * @return object|null Sync record or null if not found
+     */
+    public static function get_sync_status($order_id) {
+        global $wpdb;
+        
+        $table_name = $wpdb->prefix . self::$table_name;
+        
+        return $wpdb->get_row($wpdb->prepare(
+            "SELECT * FROM $table_name WHERE order_id = %d",
+            $order_id
+        ));
+    }
+    
+    /**
+     * Manual retry - for admin interface only
+     * CRITICAL: Requires confirmation for successful orders
+     * 
+     * @param int $order_id Order ID to retry
+     * @param bool $confirmed Whether user confirmed retry on successful order
+     * @return array Result array with success status and message
+     */
+    public static function manual_retry($order_id, $confirmed = false) {
+        $sync_record = self::get_sync_status($order_id);
+        
+        if (!$sync_record) {
+            return [
+                'success' => false,
+                'message' => 'Order has no sync record. Cannot retry.'
+            ];
+        }
+        
+        // Check if order is currently in progress
+        if ($sync_record->sync_status === 'in_progress') {
+            return [
+                'success' => false,
+                'message' => 'Order is currently being processed by another operation. Cannot retry now. Please wait and try again.'
+            ];
+        }
+        
+        // Check if order is successful and needs confirmation
+        if ($sync_record->sync_status === 'success' && !$confirmed) {
+            return [
+                'success' => false,
+                'needs_confirmation' => true,
+                'message' => 'This order already exists in SAP. Are you sure you want to resend it?'
+            ];
+        }
+        
+        // Reset attempt counter for manual retry
+        global $wpdb;
+        $table_name = $wpdb->prefix . self::$table_name;
+        
+        $wpdb->update(
+            $table_name,
+            [
+                'sync_status' => 'pending',
+                'attempt_number' => 0, // Will be incremented by log_sync_start
+                'next_retry_time' => null,
+                'error_message' => null
+            ],
+            ['order_id' => $order_id],
+            ['%s', '%d', '%s', '%s'],
+            ['%d']
+        );
+        
+        // Call the integration function
+        if (function_exists('sap_handle_order_integration')) {
+            error_log("SAP Sync Logger: Manual retry initiated for order $order_id by admin" . ($confirmed ? ' (confirmed for successful order)' : ''));
+            sap_handle_order_integration($order_id);
+            
+            return [
+                'success' => true,
+                'message' => 'Manual retry initiated successfully.'
+            ];
+        } else {
+            return [
+                'success' => false,
+                'message' => 'Order integration function not available.'
+            ];
         }
     }
     
@@ -421,13 +751,13 @@ class SAP_Sync_Logger {
         }
     }
     
-    /**
-     * Retry functionality removed - no retries for orders
-     */
 }
 
 // Initialize the sync logger
 SAP_Sync_Logger::init();
+
+// Register Action Scheduler hook for retry processing
+add_action('sap_retry_order_integration', [SAP_Sync_Logger::class, 'process_retry']);
 
 // Schedule daily summary email
 // add_action('wp', [SAP_Sync_Logger::class, 'schedule_daily_summary']);
@@ -435,5 +765,192 @@ SAP_Sync_Logger::init();
 // Hook for daily summary email
 // add_action('sap_daily_summary_email', [SAP_Sync_Logger::class, 'send_daily_email_summary']);
 
-// Retry functionality removed - no retries for orders
+/**
+ * Add SAP Sync meta box to order edit page
+ */
+add_action('add_meta_boxes', function() {
+    add_meta_box(
+        'sap_sync_status',
+        'SAP Integration Status',
+        'sap_sync_status_meta_box',
+        'shop_order',
+        'side',
+        'high'
+    );
+    
+    // HPOS compatible
+    add_meta_box(
+        'sap_sync_status',
+        'SAP Integration Status',
+        'sap_sync_status_meta_box',
+        'woocommerce_page_wc-orders',
+        'side',
+        'high'
+    );
+});
+
+/**
+ * Render SAP Sync status meta box
+ */
+function sap_sync_status_meta_box($post_or_order) {
+    // Get order ID (compatible with both traditional and HPOS)
+    $order_id = $post_or_order instanceof WP_Post ? $post_or_order->ID : $post_or_order->get_id();
+    $sync_status = SAP_Sync_Logger::get_sync_status($order_id);
+    
+    if (!$sync_status) {
+        echo '<p>No sync record found.</p>';
+        return;
+    }
+    
+    $status_labels = [
+        'pending' => '⏳ Pending',
+        'in_progress' => '🔄 In Progress',
+        'success' => '✅ Success',
+        'failed' => '❌ Failed',
+        'retry_pending' => '⏱️ Retry Pending',
+        'permanently_failed' => '🚫 Permanently Failed',
+        'blocked' => '🛑 Blocked'
+    ];
+    
+    $status_label = $status_labels[$sync_status->sync_status] ?? $sync_status->sync_status;
+    
+    echo '<div class="sap-sync-status-box">';
+    echo '<p><strong>Status:</strong> ' . esc_html($status_label) . '</p>';
+    echo '<p><strong>Attempts:</strong> ' . esc_html($sync_status->attempt_number) . ' / 3</p>';
+    
+    if ($sync_status->last_attempt_time) {
+        echo '<p><strong>Last Attempt:</strong><br>' . esc_html($sync_status->last_attempt_time) . '</p>';
+    }
+    
+    if ($sync_status->next_retry_time) {
+        echo '<p><strong>Next Retry:</strong><br>' . esc_html($sync_status->next_retry_time) . '</p>';
+    }
+    
+    if ($sync_status->error_message) {
+        echo '<p><strong>Error:</strong><br><small>' . esc_html(substr($sync_status->error_message, 0, 200)) . '</small></p>';
+    }
+    
+    if ($sync_status->customer_doc_entry) {
+        echo '<p><strong>SAP Customer:</strong> ' . esc_html($sync_status->customer_doc_entry) . '</p>';
+    }
+    
+    if ($sync_status->order_doc_entry) {
+        echo '<p><strong>SAP Order:</strong> ' . esc_html($sync_status->order_doc_entry) . '</p>';
+    }
+    
+    // Manual retry button
+    if ($sync_status->sync_status !== 'in_progress') {
+        echo '<hr style="margin: 15px 0;">';
+        
+        if ($sync_status->sync_status === 'success') {
+            // Success order needs confirmation
+            echo '<p><strong style="color: #d63638;">⚠️ Warning:</strong><br>';
+            echo '<small>This order already exists in SAP. Retrying will create a duplicate order.</small></p>';
+            echo '<button type="button" class="button button-primary" onclick="sapConfirmRetry(' . $order_id . ')" style="width: 100%; margin-top: 10px;">Resend to SAP</button>';
+        } else {
+            // Other statuses - simple retry
+            echo '<button type="button" class="button button-primary" onclick="sapManualRetry(' . $order_id . ', false)" style="width: 100%;">Retry SAP Sync</button>';
+        }
+    } else {
+        echo '<hr style="margin: 15px 0;">';
+        echo '<p><em style="color: #d63638;">⚠️ Sync in progress... Please wait.</em></p>';
+    }
+    
+    echo '</div>';
+}
+
+/**
+ * Handle AJAX request for manual retry
+ */
+add_action('wp_ajax_sap_manual_retry', function() {
+    check_ajax_referer('sap-manual-retry', 'security');
+    
+    if (!current_user_can('edit_shop_orders')) {
+        wp_send_json_error(['message' => 'Insufficient permissions']);
+        return;
+    }
+    
+    $order_id = isset($_POST['order_id']) ? intval($_POST['order_id']) : 0;
+    $confirmed = isset($_POST['confirmed']) ? (bool)$_POST['confirmed'] : false;
+    
+    if (!$order_id) {
+        wp_send_json_error(['message' => 'Invalid order ID']);
+        return;
+    }
+    
+    $result = SAP_Sync_Logger::manual_retry($order_id, $confirmed);
+    
+    if ($result['success']) {
+        wp_send_json_success($result);
+    } else {
+        wp_send_json_error($result);
+    }
+});
+
+/**
+ * Enqueue admin scripts for manual retry
+ */
+add_action('admin_footer', function() {
+    global $post, $pagenow;
+    
+    // Only load on order edit pages
+    if ($pagenow !== 'post.php' && strpos($_SERVER['REQUEST_URI'], 'wc-orders') === false) {
+        return;
+    }
+    
+    ?>
+    <script type="text/javascript">
+    function sapManualRetry(orderId, confirmed) {
+        if (confirmed === undefined) {
+            confirmed = false;
+        }
+        
+        var button = event.target;
+        var originalText = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Processing...';
+        
+        jQuery.ajax({
+            url: ajaxurl,
+            type: 'POST',
+            data: {
+                action: 'sap_manual_retry',
+                order_id: orderId,
+                confirmed: confirmed,
+                security: '<?php echo wp_create_nonce('sap-manual-retry'); ?>'
+            },
+            success: function(response) {
+                if (response.success) {
+                    alert('✅ ' + response.data.message);
+                    location.reload();
+                } else if (response.data.needs_confirmation) {
+                    // This shouldn't happen with the new flow, but keep as fallback
+                    sapConfirmRetry(orderId);
+                } else {
+                    alert('❌ ' + response.data.message);
+                }
+                button.disabled = false;
+                button.textContent = originalText;
+            },
+            error: function(xhr, status, error) {
+                alert('❌ Error: ' + error);
+                button.disabled = false;
+                button.textContent = originalText;
+            }
+        });
+    }
+    
+    function sapConfirmRetry(orderId) {
+        var message = '⚠️ WARNING: This order already exists in SAP!\n\n';
+        message += 'Resending will create a DUPLICATE order in SAP.\n\n';
+        message += 'Are you sure you want to resend this order?';
+        
+        if (confirm(message)) {
+            sapManualRetry(orderId, true);
+        }
+    }
+    </script>
+    <?php
+});
+
 ?>

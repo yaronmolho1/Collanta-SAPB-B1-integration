@@ -519,27 +519,10 @@ function sap_handle_order_integration($order_id) {
     error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
 
     // Check if order should be synced (prevents duplicates and manages retries)
-    // RETRYING COMMENTED OUT - Check only for success/in_progress, skip retry logic
-    if (class_exists('SAP_Sync_Logger')) {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'sap_order_sync_log';
-        $sync_record = $wpdb->get_row($wpdb->prepare(
-            "SELECT sync_status FROM $table_name WHERE order_id = %d",
-            $order_id
-        ));
-        
-        // Only skip if already successful or in progress (no retry logic)
-        if ($sync_record && in_array($sync_record->sync_status, ['success', 'in_progress'])) {
-            error_log('SAP Integration: Order ' . $order_id . ' already synced or in progress. Skipping.');
-            return;
-        }
+    if (class_exists('SAP_Sync_Logger') && !SAP_Sync_Logger::should_sync_order($order_id)) {
+        error_log('SAP Integration: Order ' . $order_id . ' should not be synced at this time. Skipping.');
+        return;
     }
-    
-    // Original retry logic commented out:
-    // if (!class_exists('SAP_Sync_Logger') || !SAP_Sync_Logger::should_sync_order($order_id)) {
-    //     error_log('SAP Integration: Order ' . $order_id . ' should not be synced at this time. Skipping.');
-    //     return;
-    // }
 
     // Log sync start
     if (class_exists('SAP_Sync_Logger')) {
@@ -1028,25 +1011,9 @@ function sap_handle_admin_order_save($order_id, $post = null) {
     }
 
     $order = wc_get_order($order_id);
-    // RETRYING COMMENTED OUT - Check only for success/in_progress, skip retry logic
-    if ($order && class_exists('SAP_Sync_Logger')) {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'sap_order_sync_log';
-        $sync_record = $wpdb->get_row($wpdb->prepare(
-            "SELECT sync_status FROM $table_name WHERE order_id = %d",
-            $order_id
-        ));
-        
-        // Only process if not already successful or in progress (no retry logic)
-        if (!$sync_record || !in_array($sync_record->sync_status, ['success', 'in_progress'])) {
-            sap_handle_order_integration_background($order_id);
-        }
+    if ($order && class_exists('SAP_Sync_Logger') && SAP_Sync_Logger::should_sync_order($order_id)) {
+        sap_handle_order_integration_background($order_id);
     }
-    
-    // Original retry logic commented out:
-    // if ($order && class_exists('SAP_Sync_Logger') && SAP_Sync_Logger::should_sync_order($order_id)) {
-    //     sap_handle_order_integration_background($order_id);
-    // }
 }
 
 // Traditional hook for legacy order storage
