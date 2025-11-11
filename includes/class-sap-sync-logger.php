@@ -647,18 +647,56 @@ class SAP_Sync_Logger {
         global $wpdb;
         $table_name = $wpdb->prefix . self::$table_name;
         
-        $wpdb->update(
+        // Update the existing record to reset for manual retry
+        $update_result = $wpdb->update(
             $table_name,
             [
                 'sync_status' => 'pending',
                 'attempt_number' => 0, // Will be incremented by log_sync_start
                 'next_retry_time' => null,
-                'error_message' => null
+                'error_message' => null,
+                'sap_response' => null
             ],
             ['order_id' => $order_id],
-            ['%s', '%d', '%s', '%s'],
+            ['%s', '%d', '%s', '%s', '%s'],
             ['%d']
         );
+        
+        // Check if update succeeded
+        if ($update_result === false) {
+            error_log("SAP Sync Logger: CRITICAL - Failed to update sync record for manual retry of order $order_id. DB Error: " . $wpdb->last_error);
+            return [
+                'success' => false,
+                'message' => 'Database error: Failed to reset sync record. Please check error logs.'
+            ];
+        }
+        
+        if ($update_result === 0) {
+            // No rows updated - record might have been deleted or order_id doesn't match
+            error_log("SAP Sync Logger: WARNING - No rows updated for order $order_id manual retry. Record may have been deleted.");
+            
+            // Try to re-create the record
+            $insert_result = $wpdb->insert(
+                $table_name,
+                [
+                    'order_id' => $order_id,
+                    'sync_status' => 'pending',
+                    'attempt_number' => 0,
+                    'last_attempt_time' => current_time('mysql')
+                ],
+                ['%d', '%s', '%d', '%s']
+            );
+            
+            if ($insert_result === false) {
+                error_log("SAP Sync Logger: CRITICAL - Failed to insert new sync record for order $order_id. DB Error: " . $wpdb->last_error);
+                return [
+                    'success' => false,
+                    'message' => 'Database error: Could not create sync record. Error: ' . $wpdb->last_error
+                ];
+            }
+            
+            error_log("SAP Sync Logger: Created new sync record for order $order_id (record was missing)");
+        }
         
         // Call the integration function
         if (function_exists('sap_handle_order_integration')) {
