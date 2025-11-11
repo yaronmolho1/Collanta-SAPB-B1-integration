@@ -29,6 +29,9 @@ function my_sap_importer_load_files() {
         // טען את הקוד החדש של יבוא מוצרים ידני
         require_once plugin_dir_path( __FILE__ ) . 'includes/sap-manual-product-import.php';
         
+        // טען את יוצר המוצרים החדש מ-SAP
+        require_once plugin_dir_path( __FILE__ ) . 'includes/sap-product-creator.php';
+        
         // טען את מעבד הרקע של SAP
         require_once plugin_dir_path( __FILE__ ) . 'includes/class-sap-background-processor.php';
         
@@ -221,6 +224,36 @@ function my_sap_importer_settings_page() {
             echo sap_manual_product_import();
             }
             */
+        }
+        ?>
+
+        <hr>
+
+        <h2>יצירת מוצרים חדשים מ-SAP (אוטומטי)</h2>
+        <form method="post" action="">
+            <?php wp_nonce_field('run_sap_product_creator', 'sap_product_creator_nonce'); ?>
+            <p>
+                לחץ על הכפתור למטה כדי ליצור מוצרים חדשים מ-SAP (פריטים עם U_SiteGroupID או U_SiteItemID ריקים).<br>
+                פעולה זו תיצור מוצרים חדשים בלבד, מקובצים לפי SWW, עם סטטוס "ממתין לפרסום".<br>
+                <strong>📱 חדש:</strong> תקבל הודעת טלגרם עם סיכום היצירה!
+            </p>
+            <p>
+                <strong>שימו לב:</strong> מוצרים חדשים ייווצרו עם סטטוס "pending" ולא יפורסמו אוטומטית.
+            </p>
+            <p>
+                <input type="submit" name="run_product_creator" class="button button-primary" value="צור מוצרים חדשים מ-SAP">
+            </p>
+        </form>
+
+        <?php
+        // Handle product creator execution
+        if (isset($_POST['run_product_creator']) && current_user_can('manage_options') && check_admin_referer('run_sap_product_creator', 'sap_product_creator_nonce')) {
+            echo '<div class="notice notice-info"><p>מתחיל יצירת מוצרים חדשים... אנא המתן.</p></div>';
+            if (function_exists('sap_create_products_from_api')) {
+                echo sap_create_products_from_api();
+            } else {
+                echo '<p style="color: red;">שגיאה: פונקציית יצירת המוצרים לא זמינה.</p>';
+            }
         }
         ?>
 
@@ -593,6 +626,14 @@ function my_sap_importer_settings_page() {
             echo '<p>🔄 סנכרון קודי מקור מ-SAP: <strong>' . date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_source_codes) . '</strong> (03:00)</p>';
         } else {
             echo '<p>❌ סנכרון קודי מקור: לא מתוזמן</p>';
+        }
+        
+        // קרון יצירת מוצרים שבועי
+        $next_product_creator = wp_next_scheduled('sap_weekly_product_creation_event');
+        if ($next_product_creator) {
+            echo '<p>🔄 יצירת מוצרים חדשים מ-SAP: <strong>' . date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_product_creator) . '</strong> (שבועי - ראשון 03:00)</p>';
+        } else {
+            echo '<p>❌ יצירת מוצרים חדשים: לא מתוזמן</p>';
         }
         ?>
 
