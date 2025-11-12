@@ -865,8 +865,8 @@ function sap_handle_order_integration($order_id) {
                 "CardCode"        => $sap_customer_code,
                 "DocTotal"        => $order_total,
                 "ImportFileNum"   => (string) $order->get_order_number(),
-                "Comments"        => "WooCommerce Order #" . $order->get_order_number() . " from " . $customer_email . ($customer_note ? " - " . $customer_note : ""),
-                "JournalMemo"     => "Sales Orders - " . $sap_customer_code,
+                "Comments"        => $customer_note,
+                "JournalMemo"     => "WooCommerce Order #" . $order->get_order_number() . " from " . $customer_email,
                 "SalesPersonCode" => 2,
                 "Series"          => 77, // Order series
                 "DocumentsOwner"  => 1,
