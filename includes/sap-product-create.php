@@ -33,7 +33,7 @@ function sap_enqueue_create_products() {
 }
 
 // Telegram notification configuration for product creation
-define('SAP_CREATOR_TELEGRAM_BOT_TOKEN', '8456245551:AAFv07KtOAA4OFTp1y1oGru8Q2egh9CWEJo');
+define('SAP_CREATOR_TELEGRAM_BOT_TOKEN', '8309945060:AAHKHfGtTf6D_U_JnapGrTHxOLcuht9ULA4');
 define('SAP_CREATOR_TELEGRAM_CHAT_ID', '5418067438');
 
 /**
@@ -475,15 +475,19 @@ function sap_create_variation($item, $parent_id, $token) {
     // Set variation attributes (only size and color)
     $variation_attributes = [];
     
+    // Size attribute from U_ssize
     if (!empty($item['U_ssize'])) {
-        $size_slug = sanitize_title($item['U_ssize']);
-        sap_ensure_term_exists('pa_size', $item['U_ssize'], $size_slug);
+        $size_value = trim($item['U_ssize']);
+        $size_slug = sanitize_title($size_value);
+        sap_ensure_term_exists('pa_size', $size_value, $size_slug);
         $variation_attributes['pa_size'] = $size_slug;
     }
     
+    // Color attribute from U_scolor
     if (!empty($item['U_scolor'])) {
-        $color_slug = sanitize_title($item['U_scolor']);
-        sap_ensure_term_exists('pa_color', $item['U_scolor'], $color_slug);
+        $color_value = trim($item['U_scolor']);
+        $color_slug = sanitize_title($color_value);
+        sap_ensure_term_exists('pa_color', $color_value, $color_slug);
         $variation_attributes['pa_color'] = $color_slug;
     }
     
@@ -624,7 +628,7 @@ function sap_set_product_attributes($product, $item, $for_variations = false) {
 /**
  * Create variation attributes for parent variable product
  * Only creates size and color attributes (for variations)
- * Rule: Skip missing attributes gracefully
+ * Uses U_ssize and U_scolor fields only
  *
  * @param array $items Array of items in same SWW group
  * @return array Array of WC_Product_Attribute objects
@@ -636,54 +640,50 @@ function sap_create_variation_attributes($items) {
     
     // Collect all unique size and color values from items
     foreach ($items as $item) {
+        // Size attribute from U_ssize
         if (!empty($item['U_ssize'])) {
-            $size_slug = sanitize_title($item['U_ssize']);
-            $size_values[$size_slug] = $item['U_ssize'];
+            $size_values[] = trim($item['U_ssize']);
         }
+        
+        // Color attribute from U_scolor
         if (!empty($item['U_scolor'])) {
-            $color_slug = sanitize_title($item['U_scolor']);
-            $color_values[$color_slug] = $item['U_scolor'];
+            $color_values[] = trim($item['U_scolor']);
         }
     }
     
+    $size_values = array_unique($size_values);
+    $color_values = array_unique($color_values);
+    
     // Size attribute (ID 4)
-    if (!empty($size_values) && taxonomy_exists('pa_size')) {
-        // Ensure all terms exist
-        foreach ($size_values as $slug => $value) {
-            sap_ensure_term_exists('pa_size', $value, $slug);
-        }
-        
+    if (!empty($size_values)) {
         $size_attribute = new WC_Product_Attribute();
         $size_attribute->set_id(4); // Attribute ID 4
         $size_attribute->set_name('pa_size');
-        $size_attribute->set_options(array_keys($size_values));
+        $size_attribute->set_options($size_values);
         $size_attribute->set_position(0);
-        $size_attribute->set_visible(true);
+        $size_attribute->set_visible(false); // Match creation_old.php
         $size_attribute->set_variation(true);
         
         $attributes_array['pa_size'] = $size_attribute;
-    } elseif (!empty($size_values)) {
-        error_log('SAP Creator: pa_size attribute missing (ID 4 expected) - skipping');
+        
+        // Ensure size taxonomy exists and terms are created
+        sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
     }
     
     // Color attribute (ID 3)
-    if (!empty($color_values) && taxonomy_exists('pa_color')) {
-        // Ensure all terms exist
-        foreach ($color_values as $slug => $value) {
-            sap_ensure_term_exists('pa_color', $value, $slug);
-        }
-        
-        $color_attribute = new WC_Product_Attribute();
+    if (!empty($color_values)) {
+        $color_attribute = new WC_Product_Attribute(); // FIX: This was missing!
         $color_attribute->set_id(3); // Attribute ID 3
         $color_attribute->set_name('pa_color');
-        $color_attribute->set_options(array_keys($color_values));
+        $color_attribute->set_options($color_values);
         $color_attribute->set_position(1);
-        $color_attribute->set_visible(true);
+        $color_attribute->set_visible(false); // Match creation_old.php
         $color_attribute->set_variation(true);
         
         $attributes_array['pa_color'] = $color_attribute;
-    } elseif (!empty($color_values)) {
-        error_log('SAP Creator: pa_color attribute missing (ID 3 expected) - skipping');
+        
+        // Ensure color taxonomy exists and terms are created
+        sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
     }
     
     return $attributes_array;
@@ -733,22 +733,26 @@ function sap_batch_create_variations($parent_id, $items, $token) {
         }
         $variation_data['stock_quantity'] = $stock_quantity;
         
-        // Set attributes - only if taxonomies exist (skip missing gracefully)
+        // Set attributes from U_ssize and U_scolor only
+        // Size attribute from U_ssize
         if (!empty($item['U_ssize']) && taxonomy_exists('pa_size')) {
-            $size_slug = sanitize_title($item['U_ssize']);
-            sap_ensure_term_exists('pa_size', $item['U_ssize'], $size_slug);
+            $size_value = trim($item['U_ssize']);
+            $size_slug = sanitize_title($size_value);
+            sap_ensure_term_exists('pa_size', $size_value, $size_slug);
             $variation_data['attributes'][] = [
                 'id' => 4,
-                'option' => $item['U_ssize']
+                'option' => $size_value
             ];
         }
         
+        // Color attribute from U_scolor
         if (!empty($item['U_scolor']) && taxonomy_exists('pa_color')) {
-            $color_slug = sanitize_title($item['U_scolor']);
-            sap_ensure_term_exists('pa_color', $item['U_scolor'], $color_slug);
+            $color_value = trim($item['U_scolor']);
+            $color_slug = sanitize_title($color_value);
+            sap_ensure_term_exists('pa_color', $color_value, $color_slug);
             $variation_data['attributes'][] = [
                 'id' => 3,
-                'option' => $item['U_scolor']
+                'option' => $color_value
             ];
         }
         
@@ -897,6 +901,48 @@ function sap_ensure_term_exists($taxonomy, $term_name, $term_slug) {
     }
     
     return true;
+}
+
+/**
+ * Ensure attribute taxonomy exists and create terms
+ * Based on creation_old.php logic
+ *
+ * @param string $taxonomy Taxonomy slug (e.g., 'pa_size')
+ * @param string $label Attribute label (e.g., 'Size')
+ * @param array $terms Array of term names
+ */
+function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
+    // Ensure taxonomy exists
+    if (!taxonomy_exists($taxonomy)) {
+        $attribute_slug = str_replace('pa_', '', $taxonomy);
+        $created_attr_id = wc_create_attribute([
+            'name' => $label,
+            'slug' => $attribute_slug,
+            'type' => 'select',
+            'order_by' => 'menu_order',
+            'has_archives' => false,
+        ]);
+        
+        if (is_wp_error($created_attr_id)) {
+            error_log("SAP Creator: Failed to create attribute {$label}: " . $created_attr_id->get_error_message());
+            return;
+        }
+    }
+    
+    // Create terms if they don't exist
+    foreach ($terms as $term_name) {
+        if (empty($term_name)) continue;
+        
+        $term_slug = sanitize_title($term_name);
+        $term_exists = term_exists($term_slug, $taxonomy);
+        
+        if (!$term_exists) {
+            $inserted_term = wp_insert_term($term_name, $taxonomy);
+            if (is_wp_error($inserted_term)) {
+                error_log("SAP Creator: Failed to insert term {$term_name} for attribute {$taxonomy}: " . $inserted_term->get_error_message());
+            }
+        }
+    }
 }
 
 /**
