@@ -566,19 +566,6 @@ function sap_handle_order_integration($order_id) {
 
     $customer_vat_id = $order->get_meta('_billing_vat_id'); // Assuming there's a custom field for VAT ID
 
-    // Get GroupCode from fineline source code (קוד מוסד, אופציונלי)
-    $fineline_source_code = $order->get_meta('_fineline_source_code');
-    if (!empty($fineline_source_code)) {
-        $code_int = (int) $fineline_source_code;
-        if ($code_int >= 102 && $code_int <= 150) {
-            $group_code = $code_int;
-        } else {
-            $group_code = 123;
-        }
-    } else {
-        $group_code = 123;
-    }
-
     // Get customer note for address comments
     $customer_note = $order->get_customer_note();
 
@@ -641,7 +628,6 @@ function sap_handle_order_integration($order_id) {
         "CardName"        => $customer_full_name,
         "Series"          => 71, // SAP B1 will auto-assign next CardCode based on this Series
         "CardType"        => "cCustomer",
-        "GroupCode"       => $group_code, // Use GroupCode from fineline source code
         "Phone1"          => $customer_phone,
         "PriceListNum"    => 1, // Ensure this is correct PriceListNum
         "SalesPersonCode" => 2, // Sales person code
