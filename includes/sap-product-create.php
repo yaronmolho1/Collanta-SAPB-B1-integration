@@ -56,8 +56,8 @@ if (!function_exists('sap_create_products_from_api')) {
         echo "<h2>מתחיל תהליך יצירת מוצרים חדשים מ-SAP...</h2>";
         
         $start_time = microtime(true);
-        $start_message = "✓ SAP Product Creation Started\n";
-        $start_message .= "Time: " . current_time('Y-m-d H:i:s');
+        $start_message = "תחילת יצירת מוצרים מ-SAP\n";
+        $start_message .= "זמן: " . current_time('Y-m-d H:i:s');
         sap_creator_send_telegram_message($start_message);
 
         // 1. Connect and get token
@@ -125,7 +125,7 @@ if (!function_exists('sap_create_products_from_api')) {
         if (is_wp_error($itemsResponse)) {
             echo "<p style='color: red;'>❌ <strong>שגיאה בתגובת הזרמה:</strong> " . esc_html($itemsResponse->get_error_message()) . "</p>";
             
-            $error_message = "✗ SAP Product Creation Failed\n";
+            $error_message = "יצירת מוצרים מ-SAP נכשלה\n";
             $error_message .= "Error: " . $itemsResponse->get_error_message() . "\n";
             $error_message .= "Time: " . current_time('Y-m-d H:i:s');
             sap_creator_send_telegram_message($error_message);
@@ -142,8 +142,8 @@ if (!function_exists('sap_create_products_from_api')) {
         if (empty($items)) {
             echo "<p style='color: orange;'>לא נמצאו פריטים ב-SAP.</p>";
             
-            $empty_message = "✓ SAP Product Creation - No Items Found\n";
-            $empty_message .= "Result: No items found in SAP API\n";
+            $empty_message = "יצירת מוצרים מ-SAP - לא נמצאו פריטים\n";
+            $empty_message .= "תוצאה: לא נמצאו פריטים ב-API\n";
             $empty_message .= "Time: " . current_time('Y-m-d H:i:s');
             sap_creator_send_telegram_message($empty_message);
             
@@ -173,7 +173,7 @@ if (!function_exists('sap_create_products_from_api')) {
         if (empty($filtered_items)) {
             echo "<p style='color: orange;'>כל הפריטים כבר מיובאים ב-WooCommerce.</p>";
             
-            $empty_message = "✓ SAP Product Creation - All Items Already Imported\n";
+            $empty_message = "יצירת מוצרים מ-SAP - כל הפריטים כבר מיובאים\n";
             $empty_message .= "Result: All " . count($items) . " items already have U_SiteGroupID and U_SiteItemID\n";
             $empty_message .= "Time: " . current_time('Y-m-d H:i:s');
             sap_creator_send_telegram_message($empty_message);
@@ -228,11 +228,11 @@ if (!function_exists('sap_create_products_from_api')) {
                 } else {
                     echo "<span style='color: green;'>✓ מוצר פשוט נוצר בהצלחה (ID: {$result['product_id']})</span><br>";
                     $creation_stats['simple_created']++;
-                    $creation_log[] = "✓ מוצר פשוט - SKU: {$group_items[0]['ItemCode']}";
+                    $creation_log[] = "מוצר פשוט - SKU: {$group_items[0]['ItemCode']}";
                     
                     if (!$result['sap_updated']) {
                         $creation_stats['sap_update_failed']++;
-                        $error_log[] = "✗ עדכון SAP נכשל - SKU: {$group_items[0]['ItemCode']}";
+                        $error_log[] = "עדכון SAP נכשל - SKU: {$group_items[0]['ItemCode']}";
                     }
                 }
             } else {
@@ -247,11 +247,11 @@ if (!function_exists('sap_create_products_from_api')) {
                     echo "<span style='color: green;'>✓ מוצר משתנה נוצר בהצלחה (Parent ID: {$result['parent_id']}, {$result['variations_count']} וריאציות)</span><br>";
                     $creation_stats['variable_created']++;
                     $creation_stats['variations_created'] += $result['variations_count'];
-                    $creation_log[] = "✓ מוצר משתנה - SWW: {$sww} ({$result['variations_count']} וריאציות)";
+                    $creation_log[] = "מוצר משתנה - SWW: {$sww} ({$result['variations_count']} וריאציות)";
                     
                     if ($result['sap_update_failed'] > 0) {
                         $creation_stats['sap_update_failed'] += $result['sap_update_failed'];
-                        $error_log[] = "✗ עדכון SAP נכשל ל-{$result['sap_update_failed']} פריטים ב-SWW: {$sww}";
+                        $error_log[] = "עדכון SAP נכשל ל-{$result['sap_update_failed']} פריטים ב-SWW: {$sww}";
                     }
                 }
             }
@@ -337,7 +337,7 @@ function sap_create_simple_product($item, $token) {
 
 /**
  * Create a variable product with variations from SAP items
- * Enhanced with batch variation creation like the blueprint
+ * Creates proper variations with SKU, price*1.18, and correct attributes
  *
  * @param array $items Array of SAP item data (all same SWW)
  * @param string $sww SWW value for parent product name
@@ -392,48 +392,40 @@ function sap_create_variable_product($items, $sww, $token) {
         error_log("SAP Creator: Created new variable parent {$parent_id} for SWW {$sww}");
     }
     
-    // Separate items into those that need creation vs update
-    $items_to_create = [];
-    $items_to_update = [];
-    
-    foreach ($items as $item) {
-        if (empty($item['U_SiteItemID'])) {
-            $items_to_create[] = $item;
-        } else {
-            $items_to_update[] = $item;
-        }
-    }
-    
+    // Create variations for each item (SKU) individually
     $variations_created = 0;
-    $variations_updated = 0;
     $sap_update_failed = 0;
     
-    // Batch create new variations (like blueprint pattern)
-    if (!empty($items_to_create)) {
-        $create_result = sap_batch_create_variations($parent_id, $items_to_create, $token);
-        if (is_wp_error($create_result)) {
-            error_log("SAP Creator: Batch variation creation failed: " . $create_result->get_error_message());
-            $sap_update_failed += count($items_to_create);
-        } else {
-            $variations_created = $create_result['created_count'];
-            $sap_update_failed += $create_result['sap_update_failed'];
+    foreach ($items as $item) {
+        $item_code = $item['ItemCode'] ?? '';
+        
+        if (empty($item_code)) {
+            continue;
         }
-    }
-    
-    // Batch update existing variations (like blueprint pattern)
-    if (!empty($items_to_update)) {
-        $update_result = sap_batch_update_variations($parent_id, $items_to_update, $token);
-        if (is_wp_error($update_result)) {
-            error_log("SAP Creator: Batch variation update failed: " . $update_result->get_error_message());
+        
+        // Skip if variation already exists (has U_SiteItemID)
+        if (!empty($item['U_SiteItemID'])) {
+            continue;
+        }
+        
+        // Create variation for this specific item
+        $variation_result = sap_create_variation($item, $parent_id, $token);
+        
+        if (is_wp_error($variation_result)) {
+            error_log("SAP Creator: Failed to create variation for {$item_code}: " . $variation_result->get_error_message());
+            $sap_update_failed++;
         } else {
-            $variations_updated = $update_result['updated_count'];
+            $variations_created++;
+            if (!$variation_result['sap_updated']) {
+                $sap_update_failed++;
+            }
         }
     }
     
     return [
         'parent_id' => $parent_id,
         'variations_count' => $variations_created,
-        'variations_updated' => $variations_updated,
+        'variations_updated' => 0,
         'sap_update_failed' => $sap_update_failed
     ];
 }
@@ -690,8 +682,9 @@ function sap_create_variation_attributes($items) {
 }
 
 /**
- * Batch create variations using WooCommerce API (like blueprint)
- *
+ * DEPRECATED: Batch create variations using WooCommerce API (like blueprint)
+ * This function is no longer used - variations are created individually
+ * 
  * @param int $parent_id Parent product ID
  * @param array $items Array of SAP items to create as variations
  * @param string $token SAP auth token
@@ -820,7 +813,8 @@ function sap_batch_create_variations($parent_id, $items, $token) {
 }
 
 /**
- * Batch update existing variations using WooCommerce API (like blueprint)
+ * DEPRECATED: Batch update existing variations using WooCommerce API (like blueprint)
+ * This function is no longer used - variations are handled individually
  *
  * @param int $parent_id Parent product ID  
  * @param array $items Array of SAP items to update (have U_SiteItemID)
@@ -1173,8 +1167,8 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
     $total_success = $stats['simple_created'] + $stats['variable_created'];
     $total_failed = $stats['failed'];
     
-    $status = ($total_failed === 0 && $stats['sap_update_failed'] === 0) ? "✓" : "✗";
-    $message = $status . " יצירת מוצרים מ-SAP הסתיימה\n\n";
+    $status = ($total_failed === 0 && $stats['sap_update_failed'] === 0) ? "הושלם בהצלחה" : "הושלם עם שגיאות";
+    $message = $status . " - יצירת מוצרים מ-SAP\n\n";
     
     // Summary
     $message .= "סיכום: {$total_success} הצליחו, {$total_failed} נכשלו\n\n";
@@ -1196,7 +1190,7 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
             $message .= $log_entry . "\n";
         }
         if (count($success_log) > 10) {
-            $message .= "...ועוד " . (count($success_log) - 10) . "\n";
+            $message .= "ועוד " . (count($success_log) - 10) . " נוספים\n";
         }
     }
     
@@ -1207,11 +1201,11 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
             $message .= $log_entry . "\n";
         }
         if (count($error_log) > 10) {
-            $message .= "...ועוד " . (count($error_log) - 10) . "\n";
+            $message .= "ועוד " . (count($error_log) - 10) . " נוספות\n";
         }
     }
     
-    $message .= "\nזמן ביצוע: {$duration}s\n";
+    $message .= "\nזמן ביצוע: {$duration} שניות\n";
     $message .= "זמן: " . current_time('Y-m-d H:i:s');
     
     return sap_creator_send_telegram_message($message);
@@ -1226,11 +1220,11 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
  * @return bool|WP_Error
  */
 function sap_creator_send_critical_error_notification($error_type, $error_message) {
-    $message = "🚨 SAP Product Creator - Critical Error\n\n";
-    $message .= "Error Type: {$error_type}\n";
-    $message .= "Message: {$error_message}\n";
-    $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
-    $message .= "Server: " . (isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'Unknown');
+    $message = "שגיאה קריטית ביצירת מוצרים \n\n";
+    $message .= "סוג שגיאה: {$error_type}\n";
+    $message .= "הודעה: {$error_message}\n";
+    $message .= "זמן: " . current_time('Y-m-d H:i:s') . "\n";
+    $message .= "שרת: " . (isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'לא ידוע');
     
     return sap_creator_send_telegram_message($message);
 }
@@ -1267,9 +1261,9 @@ function sap_run_weekly_product_creation_action() {
     error_log('SAP Creator: Starting weekly product creation job');
     
     // Send start notification
-    $start_message = "⏰ Weekly SAP Product Creation Started\n";
-    $start_message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
-    $start_message .= "Mode: Automated Weekly Run";
+    $start_message = "תחילת יצירת מוצרים שבועית\n";
+    $start_message .= "זמן: " . current_time('Y-m-d H:i:s') . "\n";
+    $start_message .= "מצב: ריצה אוטומטית שבועית";
     sap_creator_send_telegram_message($start_message);
     
     // Use the same Action Scheduler method as manual execution for consistency
@@ -1279,9 +1273,9 @@ function sap_run_weekly_product_creation_action() {
         error_log('SAP Creator: Weekly job queued via Action Scheduler');
         
         // Send queued notification
-        $queued_message = "📋 Weekly Product Creation Queued\n";
-        $queued_message .= "The job has been queued for background processing.\n";
-        $queued_message .= "You'll receive another notification when complete.";
+        $queued_message = "יצירת מוצרים שבועית נכנסה לתור\n";
+        $queued_message .= "המשימה נכנסה לתור לעיבוד ברקע.\n";
+        $queued_message .= "תקבל התראה נוספת בסיום.";
         sap_creator_send_telegram_message($queued_message);
     } else {
         // Fallback: Direct execution
@@ -1295,16 +1289,16 @@ function sap_run_weekly_product_creation_action() {
         
         // Send completion notification for direct execution
         $success = !empty($result) && strpos($result, 'שגיאה') === false;
-        $status = $success ? "✅ SUCCESS" : "❌ FAILED";
+        $status = $success ? "הצליח" : "נכשל";
         
-        $end_message = "{$status} Weekly SAP Product Creation Completed\n\n";
-        $end_message .= "Duration: {$duration}s\n";
-        $end_message .= "Time: " . current_time('Y-m-d H:i:s') . "\n\n";
+        $end_message = "{$status} - יצירת מוצרים שבועית הושלמה\n\n";
+        $end_message .= "זמן ביצוע: {$duration} שניות\n";
+        $end_message .= "זמן: " . current_time('Y-m-d H:i:s') . "\n\n";
         
         if ($success) {
-            $end_message .= "Products were created successfully. Check admin panel for details.";
+            $end_message .= "מוצרים נוצרו בהצלחה. בדוק במסך הניהול לפרטים.";
         } else {
-            $end_message .= "Errors occurred. Output preview:\n" . substr(strip_tags($result), 0, 200) . "...";
+            $end_message .= "ארעו שגיאות. תצוגה מקדימה:\n" . substr(strip_tags($result), 0, 200) . "...";
         }
         
         sap_creator_send_telegram_message($end_message);
