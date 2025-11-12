@@ -575,9 +575,9 @@ if (!function_exists('sap_update_variations_from_api')) {
             continue;
         }
         
-        // Update stock
-        if (is_numeric($sap_stock) && $sap_stock >= 0) {
-            $product->set_manage_stock(true);
+        // Update stock - always update even if 0 or negative
+        if (is_numeric($sap_stock)) {
+            // Always keep manage_stock enabled - don't touch this setting
             $product->set_stock_quantity($adjusted_stock);
             $product->set_stock_status($adjusted_stock > 0 ? 'instock' : 'outofstock');
             $product->save();
@@ -585,15 +585,13 @@ if (!function_exists('sap_update_variations_from_api')) {
             $stats['updated']++;
             echo "<li>{$sap_item_code} - {$sap_item_name}: מלאי עודכן ל-{$adjusted_stock} (SAP: {$sap_stock}, -10) [{$match_method}]</li>";
         } else {
-            $product->set_stock_status('outofstock');
-            $product->set_manage_stock(false);
-            $product->save();
+            // Only error if stock is not numeric at all
             $stats['errors']++;
             $failed_items[] = [
                 'item_code' => $sap_item_code,
                 'item_name' => $sap_item_name,
                 'site_item_id' => $sap_site_item_id,
-                'reason' => 'מלאי לא תקין ב-SAP'
+                'reason' => 'מלאי לא תקין ב-SAP (לא מספרי)'
             ];
         }
     }

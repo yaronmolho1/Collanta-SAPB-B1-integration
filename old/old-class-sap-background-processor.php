@@ -22,7 +22,6 @@ class SAP_Background_Processor {
     const HOOK_PRODUCT_IMPORT = 'sap_bg_product_import';
     const HOOK_SOURCE_CODES_SYNC = 'sap_bg_source_codes_sync';
     const HOOK_ORDER_INTEGRATION = 'sap_bg_order_integration';
-    const HOOK_STOCK_UPDATE = 'sap_bg_stock_update';
     
     /**
      * Telegram credentials for notifications
@@ -45,7 +44,6 @@ class SAP_Background_Processor {
         add_action(self::HOOK_PRODUCT_IMPORT, [__CLASS__, 'process_product_import']);
         add_action(self::HOOK_SOURCE_CODES_SYNC, [__CLASS__, 'process_source_codes_sync']);
         add_action(self::HOOK_ORDER_INTEGRATION, [__CLASS__, 'process_order_integration']);
-        add_action(self::HOOK_STOCK_UPDATE, [__CLASS__, 'process_stock_update']);
         
         // Test hook for debugging
         add_action('sap_test_job', [__CLASS__, 'process_test_job']);
@@ -187,13 +185,6 @@ class SAP_Background_Processor {
                         return true;
                     }
                     break;
-                    
-                case 'stock_update':
-                    if (function_exists('sap_update_variations_from_api')) {
-                        $item_code_filter = isset($args['item_code_filter']) ? $args['item_code_filter'] : null;
-                        return sap_update_variations_from_api($item_code_filter);
-                    }
-                    break;
             }
         } catch (Exception $e) {
             error_log("SAP Background Processor: Synchronous fallback failed for {$job_type}: " . $e->getMessage());
@@ -282,50 +273,6 @@ class SAP_Background_Processor {
             self::send_telegram_notification(
                 "🔄 Source Codes Sync Queued",
                 "Source codes synchronization job queued successfully.\nJob ID: {$job_id}\nUser: " . wp_get_current_user()->display_name . "\nExecution: " . date('H:i:s', $schedule_time)
-            );
-            
-            // NO MORE force_process_queue() - let WP-Cron handle it asynchronously
-        }
-        
-        return $job_id;
-    }
-    
-    /**
-     * Queue stock update job
-     * 
-     * @param string|null $item_code_filter Optional single item code to update
-     * @return int|false Job ID or false on failure
-     */
-    public static function queue_stock_update($item_code_filter = null) {
-        if (!self::is_action_scheduler_available()) {
-            return false;
-        }
-        
-        // Prevent duplicate jobs
-        if (self::has_pending_job(self::HOOK_STOCK_UPDATE)) {
-            error_log('SAP Background Processor: Stock update job already pending, skipping duplicate');
-            return false;
-        }
-        
-        $job_args = [
-            'user_id' => get_current_user_id(),
-            'timestamp' => current_time('mysql'),
-            'item_code_filter' => $item_code_filter
-        ];
-        
-        // Schedule with delay to ensure true async processing (30 seconds minimum)
-        $schedule_time = time() + 30;
-        $job_id = as_schedule_single_action($schedule_time, self::HOOK_STOCK_UPDATE, [$job_args]);
-        
-        if ($job_id) {
-            // Store job info for status tracking
-            self::store_job_info($job_id, 'stock_update', $job_args);
-            
-            // Send start notification
-            $filter_text = !empty($item_code_filter) ? " (Item: {$item_code_filter})" : " (All items)";
-            self::send_telegram_notification(
-                "🔄 Stock Update Queued",
-                "Stock update job queued successfully{$filter_text}.\nJob ID: {$job_id}\nUser: " . wp_get_current_user()->display_name . "\nExecution: " . date('H:i:s', $schedule_time)
             );
             
             // NO MORE force_process_queue() - let WP-Cron handle it asynchronously
@@ -485,68 +432,6 @@ class SAP_Background_Processor {
             // Send error notification
             self::send_telegram_notification(
                 "❌ Source Codes Sync Failed",
-                "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
-            );
-        }
-    }
-    
-    /**
-     * Process stock update in background
-     * 
-     * @param array $args Job arguments
-     */
-    public static function process_stock_update($args) {
-        error_log('SAP Background Processor: Starting stock update job - callback executed successfully');
-        
-        try {
-            // Load all required files in case they're not loaded in cron context
-            self::ensure_functions_loaded();
-            
-            // Ensure required functions are available
-            if (!function_exists('sap_update_variations_from_api')) {
-                throw new Exception('Stock update function not available after loading files');
-            }
-            
-            // Get item code filter if provided
-            $item_code_filter = isset($args['item_code_filter']) ? $args['item_code_filter'] : null;
-            
-            // Start output buffering to capture the result
-            ob_start();
-            $result = sap_update_variations_from_api($item_code_filter);
-            $output = ob_get_clean();
-            
-            // Extract job completion info
-            $success = !empty($result) && strpos($result, 'שגיאה') === false;
-            
-            // Send completion notification
-            $status = $success ? "✅ SUCCESS" : "❌ FAILED";
-            $message = "Stock Update Completed\n\n";
-            $message .= "Status: {$status}\n";
-            $message .= "User: " . get_user_by('id', $args['user_id'])->display_name . "\n";
-            $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
-            
-            if (!empty($item_code_filter)) {
-                $message .= "Filter: {$item_code_filter}\n";
-            }
-            
-            // Add summary if available
-            if (!empty($output)) {
-                $clean_output = strip_tags($output);
-                $summary = substr($clean_output, 0, 200);
-                $message .= "\nSummary: {$summary}...";
-            }
-            
-            self::send_telegram_notification("Stock Update Complete", $message);
-            
-            error_log('SAP Background Processor: Stock update job completed successfully');
-            
-        } catch (Exception $e) {
-            $error_msg = 'Stock update failed: ' . $e->getMessage();
-            error_log('SAP Background Processor: ' . $error_msg);
-            
-            // Send error notification
-            self::send_telegram_notification(
-                "❌ Stock Update Failed",
                 "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
             );
         }
