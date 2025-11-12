@@ -518,10 +518,20 @@ function sap_handle_order_integration($order_id) {
     // Log successful validation
     error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
 
-    // Check if order should be synced (prevents duplicates and manages retries)
-    if (class_exists('SAP_Sync_Logger') && !SAP_Sync_Logger::should_sync_order($order_id)) {
-        error_log('SAP Integration: Order ' . $order_id . ' should not be synced at this time. Skipping.');
-        return;
+    // Check if order should be synced (prevents duplicates) - NO RETRIES
+    if (class_exists('SAP_Sync_Logger')) {
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'sap_order_sync_log';
+        $sync_record = $wpdb->get_row($wpdb->prepare(
+            "SELECT sync_status FROM $table_name WHERE order_id = %d",
+            $order_id
+        ));
+        
+        // Only skip if already successful or in progress (no retry logic)
+        if ($sync_record && in_array($sync_record->sync_status, ['success', 'in_progress'])) {
+            error_log('SAP Integration: Order ' . $order_id . ' already synced or in progress. Skipping.');
+            return;
+        }
     }
 
     // Log sync start
@@ -574,10 +584,10 @@ function sap_handle_order_integration($order_id) {
 
     // Billing address details
     $billing_address_1 = $order->get_billing_address_1();
+    $billing_address_2 = $order->get_billing_address_2(); // House number - built-in WordPress field
     $billing_city = $order->get_billing_city();
     $billing_postcode = $order->get_billing_postcode();
     $billing_country = $order->get_billing_country();
-    $billing_street_no = $order->get_meta('_billing_street_number') ?: ''; // If there's a separate field for street number
     
 
     // Shipping address details for SAP U_ fields
@@ -646,7 +656,7 @@ function sap_handle_order_integration($order_id) {
                 "City"        => $billing_city,
                 "Country"     => "IL", // Note: Yaron set this to IL permanently
                 "AddressType" => "bo_ShipTo",
-                "StreetNo"    => $billing_street_no,
+                "StreetNo"     => $billing_address_2,
             ],
         ],
         "ContactEmployees" => [ // Add contact persons block as specified
@@ -875,7 +885,6 @@ function sap_handle_order_integration($order_id) {
                 "Series"          => 77, // Order series
                 "DocumentsOwner"  => 1,
                 "DocumentLines"   => $order_lines_for_sap,
-"Comments"        => $customer_note,
             ],
             "Invoice" => [
                 "DocumentLines" => $invoice_lines_for_sap, // BaseEntry will be filled after order creation
