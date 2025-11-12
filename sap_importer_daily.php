@@ -1,7 +1,7 @@
 <?php
 /**
  * Plugin Name: SAP B1 Integration
- * Description: סנכרון עם מערכת SAP-B1 של פיינליין. שליפות, דחיפות ועדכונים
+ * Description: סנכרון עם מערכת SAP-B1 של קולנטה. שליפות, דחיפות ועדכונים
  * Version: 1.3
  * Author: Yaron Molho
  */
@@ -236,166 +236,9 @@ function my_sap_importer_settings_page() {
                 echo '<div class="notice notice-info"><p>📦 <strong>מפעיל יצירת מוצרים חדשים מ-SAP</strong> - רק פריטים שלא קיימים ב-WooCommerce יתווספו.</p></div>';
                 echo sap_create_products_from_api();
             }
-            
-            /* COMMENTED OUT - Action Scheduler code causing count() error
-            // Check if background processing is available
-            if (class_exists('SAP_Background_Processor') && SAP_Background_Processor::is_action_scheduler_available()) {
-                // Queue background job
-                $job_id = SAP_Background_Processor::queue_product_import();
-                
-                if ($job_id) {
-                    // Wait a moment and check if job actually executed
-                    sleep(2);
-                    
-                    // Try to force execution if it didn't run
-                    $executed = false;
-                    for ($i = 0; $i < 3; $i++) {
-                        $result = SAP_Background_Processor::force_process_queue();
-                        if ($result) {
-                            $executed = true;
-                            break;
-                        }
-                        sleep(1);
-                    }
-                    
-                    if (!$executed) {
-                        // Fallback to synchronous if background failed
-                        echo '<div class="notice notice-warning"><p>⚠️ Background processing failed, executing synchronously...</p></div>';
-                        echo SAP_Background_Processor::execute_synchronous_fallback('product_import');
-                    } else {
-                        // Success - redirect to show success message
-                        $redirect_url = add_query_arg([
-                            'sap_job_queued' => 'product_import',
-                            'job_id' => $job_id
-                        ], $_SERVER['REQUEST_URI']);
-                        wp_redirect($redirect_url);
-                        exit;
-                    }
-                } else {
-                    echo '<div class="notice notice-error"><p>❌ שגיאה: לא ניתן לתזמן את המשימה. מעבר לביצוע סנכרוני...</p></div>';
-                    echo SAP_Background_Processor::execute_synchronous_fallback('product_import');
-                }
-            } else {
-                // Fallback to synchronous processing
-                echo '<div class="notice notice-warning"><p>⚠️ מעבד הרקע אינו זמין. מריץ סנכרון רגיל (עלול לחסום את האתר)...</p></div>';
-            echo sap_manual_product_import();
-            }
-            */
         }
         ?>
 
-        <hr>
-
-        <h2>סנכרון קודי מקור מ-SAP</h2>
-        <form method="post" action="">
-            <?php wp_nonce_field('run_sap_source_codes_sync', 'sap_source_codes_sync_nonce'); ?>
-            <p>
-                לחץ על הכפתור למטה כדי לסנכרן קודי מקור מ-SAP BusinessPartnerGroups.<br>
-                פעולה זו תעדכן את טבלת קודי המקור עם הנתונים העדכניים מ-SAP.<br>
-                <strong>📱 חדש:</strong> המשימה תרוץ ברקע ותקבל הודעת טלגרם כשתסתיים!
-            </p>
-            <p>
-                <input type="submit" name="run_source_codes_sync" class="button button-primary" value="סנכרן קודי מקור מ-SAP">
-            </p>
-        </form>
-
-        <?php
-        // טיפול בהפעלת סנכרון קודי מקור - רקע
-        if (isset($_POST['run_source_codes_sync']) && current_user_can('manage_options') && check_admin_referer('run_sap_source_codes_sync', 'sap_source_codes_sync_nonce')) {
-            // Check if background processing is available
-            if (class_exists('SAP_Background_Processor') && SAP_Background_Processor::is_action_scheduler_available()) {
-                // Queue background job
-                $job_id = SAP_Background_Processor::queue_source_codes_sync();
-                
-                if ($job_id) {
-                    // Wait a moment and check if job actually executed
-                    sleep(2);
-                    
-                    // Try to force execution if it didn't run
-                    $executed = false;
-                    for ($i = 0; $i < 3; $i++) {
-                        $result = SAP_Background_Processor::force_process_queue();
-                        if ($result) {
-                            $executed = true;
-                            break;
-                        }
-                        sleep(1);
-                    }
-                    
-                    if (!$executed) {
-                        // Fallback to synchronous if background failed
-                        echo '<div class="notice notice-warning"><p>⚠️ Background processing failed, executing synchronously...</p></div>';
-                        echo SAP_Background_Processor::execute_synchronous_fallback('source_codes_sync');
-                    } else {
-                        // Success - redirect to show success message
-                        $redirect_url = add_query_arg([
-                            'sap_job_queued' => 'source_codes_sync',
-                            'job_id' => $job_id
-                        ], $_SERVER['REQUEST_URI']);
-                        wp_redirect($redirect_url);
-                        exit;
-                    }
-                } else {
-                    echo '<div class="notice notice-error"><p>❌ שגיאה: לא ניתן לתזמן את המשימה. מעבר לביצוע סנכרוני...</p></div>';
-                    echo SAP_Background_Processor::execute_synchronous_fallback('source_codes_sync');
-                }
-            } else {
-                // Fallback to synchronous processing
-                echo '<div class="notice notice-warning"><p>⚠️ מעבד הרקע אינו זמין. מריץ סנכרון רגיל (עלול לחסום את האתר)...</p></div>';
-            echo sap_sync_source_codes_from_api();
-            }
-        }
-        ?>
-
-        <hr>
-
-        <h2>הקצאת קטגוריות למוצרים מ-SAP</h2>
-        <form method="post" action="">
-            <?php wp_nonce_field('run_sap_category_assignment', 'sap_category_assignment_nonce'); ?>
-            <p>
-                לחץ על הכפתור למטה כדי להפעיל הקצאת קטגוריות דו-שכבתיות למוצרים קיימים מ-SAP.<br>
-                פעולה זו תסיר קטגוריות קיימות ותקצה קטגוריות חדשות בהתבסס על נתוני SAP.<br>
-                <strong>📱 חדש:</strong> המשימה תרוץ ברקע ותקבל הודעת טלגרם כשתסתיים!
-            </p>
-            <p>
-                <input type="submit" name="run_category_assignment" class="button button-primary" value="הפעל הקצאת קטגוריות">
-            </p>
-        </form>
-
-        <?php
-        // Handle category assignment execution
-        if (isset($_POST['run_category_assignment']) && current_user_can('manage_options') && check_admin_referer('run_sap_category_assignment', 'sap_category_assignment_nonce')) {
-            echo '<div class="notice notice-info"><p>מתחיל הקצאת קטגוריות... אנא המתן.</p></div>';
-            echo sap_assign_product_categories_workflow();
-        }
-        ?>
-
-        <hr>
-
-        <h2>שינוי שמות מוצרים לעברית מ-SAP</h2>
-        <form method="post" action="">
-            <?php wp_nonce_field('run_sap_product_rename', 'sap_product_rename_nonce'); ?>
-            <p>
-                לחץ על הכפתור למטה כדי לשנות שמות מוצרים מ-"Group XXX" לשמות עבריים מ-SAP.<br>
-                פעולה זו תחליף שמות כמו "Group 109" ב-"בגד גוף ריב" בהתבסס על נתוני SAP ItemGroups.<br>
-                <strong>שים לב:</strong> הפעולה תשנה רק מוצרים עם שמות "Group XXX" ותעדכן את ה-slug אוטומטית.
-            </p>
-            <p>
-                <input type="submit" name="run_product_rename" class="button button-primary" value="שנה שמות מוצרים לעברית">
-            </p>
-        </form>
-
-        <?php
-        // Handle product renaming execution
-        if (isset($_POST['run_product_rename']) && current_user_can('manage_options') && check_admin_referer('run_sap_product_rename', 'sap_product_rename_nonce')) {
-            echo '<div class="notice notice-info"><p>מתחיל שינוי שמות מוצרים... אנא המתן.</p></div>';
-            if (function_exists('sap_rename_products_with_group_names')) {
-                echo sap_rename_products_with_group_names();
-            } else {
-                echo '<p style="color: red;">שגיאה: פונקציית שינוי השמות לא זמינה.</p>';
-            }
-        }
-        ?>
 
         <hr>
 
@@ -598,38 +441,6 @@ function my_sap_importer_settings_page() {
         }
         ?>
 
-        <hr>
-
-        <h2>בדיקת JSON לשליחה ל-SAP</h2>
-        <form method="post" action="">
-            <?php wp_nonce_field('test_sap_order_json', 'sap_test_json_nonce'); ?>
-            <p>
-                הזן מספר הזמנה כדי לראות את הנתוני JSON שייווצרו עבור SAP:
-            </p>
-            <label for="test_order_id">מספר הזמנה:</label>
-            <input type="number" id="test_order_id" name="test_order_id" placeholder="לדוגמה: 68063" min="1">
-            <p>
-                <input type="submit" name="test_order_json" class="button button-secondary" value="הצג JSON">
-            </p>
-        </form>
-
-        <?php
-        // טיפול בבדיקת JSON
-        if (isset($_POST['test_order_json']) && current_user_can('manage_options') && check_admin_referer('test_sap_order_json', 'sap_test_json_nonce')) {
-            display_sap_test_json_admin();
-        }
-        ?>
-
-        <hr>
-
-        <h2>היסטוריית יבוא מוצרים</h2>
-        <?php 
-        if (function_exists('sap_display_import_logs')) {
-            sap_display_import_logs(); 
-        } else {
-            echo "<p>פונקציית היסטוריה אינה זמינה כרגע.</p>";
-        }
-        ?>
 
         <hr>
 
@@ -647,12 +458,14 @@ function my_sap_importer_settings_page() {
             echo '<p>❌ ייבוא וריאציות: לא מתוזמן</p>';
         }
         
-        // קרון סנכרון קודי מקור
-        $next_source_codes = wp_next_scheduled('sap_daily_source_codes_sync_event');
-        if ($next_source_codes) {
-            echo '<p>🔄 סנכרון קודי מקור מ-SAP: <strong>' . date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_source_codes) . '</strong> (03:00)</p>';
-        } else {
-            echo '<p>❌ סנכרון קודי מקור: לא מתוזמן</p>';
+        // קרון יצירת מוצרים שבועי
+        if (function_exists('as_next_scheduled_action')) {
+            $next_product_creation = as_next_scheduled_action('sap_weekly_product_creation_action');
+            if ($next_product_creation) {
+                echo '<p>🔄 יצירת מוצרים שבועית מ-SAP: <strong>' . date_i18n(get_option('date_format') . ' ' . get_option('time_format'), $next_product_creation) . '</strong> (ראשון 03:00)</p>';
+            } else {
+                echo '<p>❌ יצירת מוצרים שבועית: לא מתוזמן</p>';
+            }
         }
         ?>
 

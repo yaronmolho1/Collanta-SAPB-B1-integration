@@ -396,6 +396,7 @@ function sap_create_variable_product($items, $sww, $token) {
     $variations_created = 0;
     $sap_update_failed = 0;
     
+
     foreach ($items as $item) {
         $item_code = $item['ItemCode'] ?? '';
         
@@ -502,6 +503,230 @@ function sap_create_variation($item, $parent_id, $token) {
         'variation_id' => $variation_id,
         'sap_updated' => $sap_updated
     ];
+}
+
+/**
+ * Create variations for a variable product
+ * Uses the exact same logic as creation_old.php
+ *
+ * @param int $product_id Parent product ID
+ * @param array $items Array of SAP items
+ * @return array|WP_Error Array of variation IDs mapped to ItemCode on success
+ */
+function sap_create_variations_from_items($product_id, $items) {
+    // Add array check at the start
+    if (!is_array($items)) {
+        error_log("Invalid items data for variations creation");
+        return new WP_Error('invalid_items', 'Invalid items data for variations creation');
+    }
+    
+    $variation_ids = [];
+    
+    try {
+        foreach ($items as $item) {
+            $item_code = $item['ItemCode'] ?? '';
+            
+            if (empty($item_code)) {
+                continue;
+            }
+            
+            // Create variation
+            $variation = new WC_Product_Variation();
+            $variation->set_parent_id($product_id);
+            $variation->set_sku($item_code);
+            
+            // Set attributes with fallbacks and validation
+            $variation_attributes = [];
+            
+            // Size attribute from U_ssize only (as per your requirements)
+            $size_value = null;
+            if (!empty($item['U_ssize'])) {
+                $size_value = trim($item['U_ssize']);
+            }
+            
+            if ($size_value) {
+                $variation_attributes['pa_size'] = sanitize_title($size_value);
+            }
+            
+            // Color attribute from U_scolor only (as per your requirements)
+            $color_value = null;
+            if (!empty($item['U_scolor'])) {
+                $color_value = trim($item['U_scolor']);
+            }
+            
+            if ($color_value) {
+                $variation_attributes['pa_color'] = sanitize_title($color_value);
+            }
+            
+            // Log if no attributes found
+            if (empty($variation_attributes)) {
+                error_log("SAP Creator: No attributes found for variation {$item_code} - U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
+            }
+            
+            $variation->set_attributes($variation_attributes);
+            
+            // Set price with comprehensive fallback logic (like creation_old.php)
+            $price_set = false;
+            if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+                // Get price using PriceList 1 with fallback
+                $price_result = sap_get_price_from_item($item, $item_code);
+                if ($price_result['price'] !== null) {
+                    $variation->set_regular_price($price_result['price']);
+                    $price_set = true;
+                    if ($price_result['used_fallback']) {
+                        error_log("SAP Creator: Used fallback PriceList {$price_result['pricelist_used']} for variation {$item_code}");
+                    }
+                }
+            }
+            
+            if (!$price_set) {
+                error_log("SAP Creator: No valid price found for variation {$item_code} - skipping");
+            }
+            
+            // Set stock (InStock - 10 from ItemWarehouseInfoCollection) - like creation_old.php
+            $stock_quantity = 0;
+            if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
+                foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
+                    if (isset($warehouse_info['InStock']) && is_numeric($warehouse_info['InStock'])) {
+                        $stock_quantity = max(0, (int)$warehouse_info['InStock'] - 10);
+                        break; // Use first warehouse's stock
+                    }
+                }
+            }
+            
+            $variation->set_manage_stock(true);
+            $variation->set_stock_quantity($stock_quantity);
+            $variation->set_stock_status($stock_quantity > 0 ? 'instock' : 'outofstock');
+            
+            // Set custom fields (like creation_old.php)
+            $variation->update_meta_data('_sap_item_code', $item_code);
+            $variation->update_meta_data('_sap_group_code', $item['ItemsGroupCode'] ?? '');
+            
+            // Save variation
+            $variation_id = $variation->save();
+            
+            if ($variation_id) {
+                $variation_ids[$item_code] = $variation_id;
+                error_log("SAP Creator: Created variation ID {$variation_id} for SKU {$item_code}");
+            } else {
+                error_log("SAP Creator: Failed to create variation for SKU {$item_code}");
+            }
+        }
+        
+        // Clear product cache to ensure variations are visible (like creation_old.php)
+        wc_delete_product_transients($product_id);
+        
+        // Update parent product price range after adding variations (like creation_old.php)
+        $parent_product = wc_get_product($product_id);
+        if ($parent_product && $parent_product->is_type('variable')) {
+            $parent_product->sync(false); // Sync variation prices to parent
+            $parent_product->save(); // Save after sync
+        }
+        
+        return $variation_ids;
+        
+    } catch (Exception $e) {
+        error_log('SAP Creator: Error creating variations - ' . $e->getMessage());
+        return new WP_Error('variation_creation_error', 'שגיאה ביצירת וריאציות: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Update SAP with new WooCommerce product and variation IDs
+ * Based on creation_old.php logic but using existing SAP update functions
+ *
+ * @param array $items Original SAP items
+ * @param int $product_id WooCommerce product ID
+ * @param array $variation_ids Array mapping ItemCode to variation ID
+ * @param string $auth_token SAP authentication token
+ * @return bool True on success, false on failure
+ */
+function sap_update_sap_with_site_ids($items, $product_id, $variation_ids, $auth_token) {
+    if (!is_array($items) || !is_array($variation_ids)) {
+        error_log("SAP Creator: Invalid items or variation_ids data for SAP update");
+        return false;
+    }
+    
+    error_log('SAP Creator: Starting SAP updates for ' . count($items) . ' items');
+    
+    $success_count = 0;
+    $error_count = 0;
+    
+    // Update each item individually
+    foreach ($items as $item) {
+        $item_code = $item['ItemCode'] ?? '';
+        
+        if (empty($item_code) || !isset($variation_ids[$item_code])) {
+            error_log("SAP Creator: Skipping item {$item_code} - missing variation ID");
+            continue;
+        }
+        
+        $variation_id = $variation_ids[$item_code];
+        
+        // Use the existing sap_update_item_ids function
+        $update_success = sap_update_item_ids($item_code, $product_id, $variation_id, $auth_token);
+        
+        if ($update_success) {
+            $success_count++;
+            error_log("SAP Creator: Successfully updated item {$item_code} with GroupID={$product_id}, ItemID={$variation_id}");
+        } else {
+            $error_count++;
+            error_log("SAP Creator: Failed to update item {$item_code}");
+        }
+    }
+    
+    if ($error_count > 0) {
+        error_log("SAP Creator: SAP update completed with errors: {$success_count} succeeded, {$error_count} failed");
+    } else {
+        error_log("SAP Creator: SAP update completed successfully: {$success_count} items updated");
+    }
+    
+    // Return true if at least half succeeded
+    return $success_count >= ($error_count + $success_count) / 2;
+}
+
+/**
+ * Get price from SAP item preferring PriceList 1 with fallback
+ * Uses the exact same logic as creation_old.php
+ * 
+ * @param array $item SAP item data
+ * @param string $item_code Item code for logging
+ * @return array Array with 'price' (calculated price), 'used_fallback' (bool), 'pricelist_used' (int)
+ */
+function sap_get_price_from_item($item, $item_code = '') {
+    if (!isset($item['ItemPrices']) || !is_array($item['ItemPrices'])) {
+        return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
+    }
+    
+    // First priority: Look for PriceList 1
+    foreach ($item['ItemPrices'] as $price_entry) {
+        if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1 && 
+            isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
+            $base_price = (float)$price_entry['Price'];
+            $calculated_price = floor($base_price * 1.18) . '.9';
+            return [
+                'price' => $calculated_price,
+                'used_fallback' => false,
+                'pricelist_used' => 1
+            ];
+        }
+    }
+    
+    // Fallback: Look for any other valid price list
+    foreach ($item['ItemPrices'] as $price_entry) {
+        if (isset($price_entry['PriceList']) && is_numeric($price_entry['PriceList']) &&
+            isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
+            $base_price = (float)$price_entry['Price'];
+            $calculated_price = floor($base_price * 1.18) . '.9';
+            return [
+                'price' => $calculated_price,
+                'used_fallback' => true,
+                'pricelist_used' => (int)$price_entry['PriceList']
+            ];
+        }
+    }
+    
+    return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
 }
 
 /**

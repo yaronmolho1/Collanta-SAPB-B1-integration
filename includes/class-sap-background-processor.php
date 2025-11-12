@@ -20,7 +20,6 @@ class SAP_Background_Processor {
      * Action hooks for background jobs
      */
     const HOOK_PRODUCT_IMPORT = 'sap_bg_product_import';
-    const HOOK_SOURCE_CODES_SYNC = 'sap_bg_source_codes_sync';
     const HOOK_ORDER_INTEGRATION = 'sap_bg_order_integration';
     const HOOK_STOCK_UPDATE = 'sap_bg_stock_update';
     
@@ -43,7 +42,6 @@ class SAP_Background_Processor {
         
         // Register action hooks for background processing
         add_action(self::HOOK_PRODUCT_IMPORT, [__CLASS__, 'process_product_import']);
-        add_action(self::HOOK_SOURCE_CODES_SYNC, [__CLASS__, 'process_source_codes_sync']);
         add_action(self::HOOK_ORDER_INTEGRATION, [__CLASS__, 'process_order_integration']);
         add_action(self::HOOK_STOCK_UPDATE, [__CLASS__, 'process_stock_update']);
         
@@ -69,8 +67,8 @@ class SAP_Background_Processor {
     private static function verify_hook_registration() {
         $hooks_to_check = [
             self::HOOK_PRODUCT_IMPORT,
-            self::HOOK_SOURCE_CODES_SYNC,
-            self::HOOK_ORDER_INTEGRATION
+            self::HOOK_ORDER_INTEGRATION,
+            self::HOOK_STOCK_UPDATE
         ];
         
         foreach ($hooks_to_check as $hook) {
@@ -175,11 +173,6 @@ class SAP_Background_Processor {
                     }
                     break;
                     
-                case 'source_codes_sync':
-                    if (function_exists('sap_sync_source_codes_from_api')) {
-                        return sap_sync_source_codes_from_api();
-                    }
-                    break;
                     
                 case 'order_integration':
                     if (function_exists('sap_handle_order_integration') && isset($args['order_id'])) {
@@ -247,48 +240,6 @@ class SAP_Background_Processor {
         return $job_id;
     }
     
-    /**
-     * Queue source codes sync job
-     * 
-     * @return int|false Job ID or false on failure
-     */
-    public static function queue_source_codes_sync() {
-        if (!self::is_action_scheduler_available()) {
-            return false;
-        }
-        
-        // Prevent duplicate jobs
-        if (self::has_pending_job(self::HOOK_SOURCE_CODES_SYNC)) {
-            error_log('SAP Background Processor: Source codes sync job already pending, skipping duplicate');
-            return false;
-        }
-        
-        $job_args = [
-            'user_id' => get_current_user_id(),
-            'timestamp' => current_time('mysql')
-        ];
-        
-        // Schedule with delay to ensure true async processing (30 seconds minimum)
-        $schedule_time = time() + 30;
-        $job_id = as_schedule_single_action($schedule_time, self::HOOK_SOURCE_CODES_SYNC, [$job_args]);
-        
-        // error_log("SAP Background Processor: Source codes sync job scheduled with ID: {$job_id} for execution at " . date('Y-m-d H:i:s', $schedule_time));
-        
-        if ($job_id) {
-            // Store job info for status tracking
-            self::store_job_info($job_id, 'source_codes_sync', $job_args);
-            
-            // Send start notification
-            self::send_telegram_notification(
-                "🔄 Source Codes Sync Queued",
-                "Source codes synchronization job queued successfully.\nJob ID: {$job_id}\nUser: " . wp_get_current_user()->display_name . "\nExecution: " . date('H:i:s', $schedule_time)
-            );
-            
-            // NO MORE force_process_queue() - let WP-Cron handle it asynchronously
-        }
-        
-        return $job_id;
-    }
     
     /**
      * Queue stock update job
@@ -435,60 +386,6 @@ class SAP_Background_Processor {
         }
     }
     
-    /**
-     * Process source codes sync in background
-     * 
-     * @param array $args Job arguments
-     */
-    public static function process_source_codes_sync($args) {
-        error_log('SAP Background Processor: Starting source codes sync job - callback executed successfully');
-        
-        try {
-            // Load all required files in case they're not loaded in cron context
-            self::ensure_functions_loaded();
-            
-            // Ensure required functions are available
-            if (!function_exists('sap_sync_source_codes_from_api')) {
-                throw new Exception('Source codes sync function not available after loading files');
-            }
-            
-            // Start output buffering to capture the result
-            ob_start();
-            $result = sap_sync_source_codes_from_api();
-            $output = ob_get_clean();
-            
-            // Extract job completion info
-            $success = !empty($result) && strpos($result, 'שגיאה') === false;
-            
-            // Send completion notification
-            $status = $success ? "✅ SUCCESS" : "❌ FAILED";
-            $message = "Source Codes Sync Completed\n\n";
-            $message .= "Status: {$status}\n";
-            $message .= "User: " . get_user_by('id', $args['user_id'])->display_name . "\n";
-            $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
-            
-            // Add summary if available
-            if (!empty($output)) {
-                $clean_output = strip_tags($output);
-                $summary = substr($clean_output, 0, 200);
-                $message .= "\nSummary: {$summary}...";
-            }
-            
-            self::send_telegram_notification("Source Codes Sync Complete", $message);
-            
-            error_log('SAP Background Processor: Source codes sync job completed successfully');
-            
-        } catch (Exception $e) {
-            $error_msg = 'Source codes sync failed: ' . $e->getMessage();
-            error_log('SAP Background Processor: ' . $error_msg);
-            
-            // Send error notification
-            self::send_telegram_notification(
-                "❌ Source Codes Sync Failed",
-                "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
-            );
-        }
-    }
     
     /**
      * Process stock update in background
@@ -706,7 +603,6 @@ class SAP_Background_Processor {
             
             $notices = [
                 'product_import' => 'Product import job queued successfully! You can continue using the site - you\'ll receive a Telegram notification when complete.',
-                'source_codes_sync' => 'Source codes sync job queued successfully! You can continue using the site - you\'ll receive a Telegram notification when complete.',
                 'order_integration' => 'Order integration job queued successfully!'
             ];
             
@@ -733,7 +629,7 @@ class SAP_Background_Processor {
         }
         
         $actions = as_get_scheduled_actions([
-            'hook' => [self::HOOK_PRODUCT_IMPORT, self::HOOK_SOURCE_CODES_SYNC, self::HOOK_ORDER_INTEGRATION],
+            'hook' => [self::HOOK_PRODUCT_IMPORT, self::HOOK_ORDER_INTEGRATION, self::HOOK_STOCK_UPDATE],
             'status' => ['pending', 'in-progress', 'complete', 'failed'],
             'per_page' => 1,
             'search' => $job_id
@@ -826,7 +722,7 @@ class SAP_Background_Processor {
         ]));
         
         $sap_pending_count = count(as_get_scheduled_actions([
-            'hook' => [self::HOOK_PRODUCT_IMPORT, self::HOOK_SOURCE_CODES_SYNC, self::HOOK_ORDER_INTEGRATION],
+            'hook' => [self::HOOK_PRODUCT_IMPORT, self::HOOK_ORDER_INTEGRATION, self::HOOK_STOCK_UPDATE],
             'status' => 'pending',
             'per_page' => 50
         ]));
