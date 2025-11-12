@@ -11,6 +11,27 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
+// Ensure Action Scheduler can trigger the product creation
+if (!function_exists('sap_create_products_async_handler')) {
+function sap_create_products_async_handler() {
+    if (function_exists('sap_create_products_from_api')) {
+        return sap_create_products_from_api();
+    }
+}
+}
+add_action('sap_create_products_async', 'sap_create_products_async_handler');
+
+// Public helper to enqueue the async job (can be called from admin/UI)
+if (!function_exists('sap_enqueue_create_products')) {
+function sap_enqueue_create_products() {
+    if (function_exists('as_enqueue_async_action')) {
+        as_enqueue_async_action('sap_create_products_async');
+        return true;
+    }
+    return false;
+}
+}
+
 // Telegram notification configuration for product creation
 define('SAP_CREATOR_TELEGRAM_BOT_TOKEN', '8456245551:AAFv07KtOAA4OFTp1y1oGru8Q2egh9CWEJo');
 define('SAP_CREATOR_TELEGRAM_CHAT_ID', '5418067438');
@@ -1197,23 +1218,52 @@ add_action('wp', 'sap_schedule_weekly_product_creation');
  * Cron job handler for Action Scheduler
  */
 function sap_run_weekly_product_creation_action() {
-    // Run in background using existing background processor if available
-    if (class_exists('SAP_Background_Processor')) {
-        $processor = new SAP_Background_Processor();
-        $task_data = [
-            'action' => 'product_creation',
-            'user_id' => 1, // System user
-            'timestamp' => time()
-        ];
+    error_log('SAP Creator: Starting weekly product creation job');
+    
+    // Send start notification
+    $start_message = "⏰ Weekly SAP Product Creation Started\n";
+    $start_message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
+    $start_message .= "Mode: Automated Weekly Run";
+    sap_creator_send_telegram_message($start_message);
+    
+    // Use the same Action Scheduler method as manual execution for consistency
+    if (function_exists('as_enqueue_async_action')) {
+        // Queue the job via Action Scheduler
+        as_enqueue_async_action('sap_create_products_async');
+        error_log('SAP Creator: Weekly job queued via Action Scheduler');
         
-        $processor->push_to_queue($task_data);
-        $processor->save()->dispatch();
-        
-        error_log('SAP Creator: Weekly product creation queued for background processing');
+        // Send queued notification
+        $queued_message = "📋 Weekly Product Creation Queued\n";
+        $queued_message .= "The job has been queued for background processing.\n";
+        $queued_message .= "You'll receive another notification when complete.";
+        sap_creator_send_telegram_message($queued_message);
     } else {
-        // Direct execution if background processor not available
-        $log_output = sap_create_products_from_api();
-        error_log('SAP Creator: Weekly product creation completed - ' . strip_tags(substr($log_output, 0, 200)));
+        // Fallback: Direct execution
+        error_log('SAP Creator: Action Scheduler not available, running directly');
+        
+        $start_time = microtime(true);
+        ob_start();
+        $result = sap_create_products_from_api();
+        $output = ob_get_clean();
+        $duration = round(microtime(true) - $start_time, 2);
+        
+        // Send completion notification for direct execution
+        $success = !empty($result) && strpos($result, 'שגיאה') === false;
+        $status = $success ? "✅ SUCCESS" : "❌ FAILED";
+        
+        $end_message = "{$status} Weekly SAP Product Creation Completed\n\n";
+        $end_message .= "Duration: {$duration}s\n";
+        $end_message .= "Time: " . current_time('Y-m-d H:i:s') . "\n\n";
+        
+        if ($success) {
+            $end_message .= "Products were created successfully. Check admin panel for details.";
+        } else {
+            $end_message .= "Errors occurred. Output preview:\n" . substr(strip_tags($result), 0, 200) . "...";
+        }
+        
+        sap_creator_send_telegram_message($end_message);
+        
+        error_log('SAP Creator: Weekly job completed in ' . $duration . 's. Success: ' . ($success ? 'Yes' : 'No'));
     }
 }
 add_action('sap_weekly_product_creation_action', 'sap_run_weekly_product_creation_action');
