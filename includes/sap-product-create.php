@@ -345,8 +345,21 @@ function sap_create_simple_product($item, $token) {
  * @return array|WP_Error Product data on success, WP_Error on failure
  */
 function sap_create_variable_product($items, $sww, $token) {
+    error_log("SAP Creator: === Starting variable product creation for SWW: {$sww} ===");
+    error_log("SAP Creator: Received " . count($items) . " items for SWW: {$sww}");
+    
     if (empty($items) || empty($sww)) {
+        error_log("SAP Creator: ERROR - Invalid data: items count=" . count($items) . ", SWW={$sww}");
         return new WP_Error('invalid_data', 'פריטים או SWW חסרים');
+    }
+    
+    // Debug: Log first item structure
+    if (!empty($items[0])) {
+        $first_item = $items[0];
+        error_log("SAP Creator: First item structure - ItemCode: " . ($first_item['ItemCode'] ?? 'not_set') . 
+                 ", U_ssize: " . ($first_item['U_ssize'] ?? 'not_set') . 
+                 ", U_scolor: " . ($first_item['U_scolor'] ?? 'not_set') . 
+                 ", U_SiteItemID: " . ($first_item['U_SiteItemID'] ?? 'not_set'));
     }
     
     // Check if any item has U_SiteGroupID filled (existing parent)
@@ -396,32 +409,41 @@ function sap_create_variable_product($items, $sww, $token) {
     $variations_created = 0;
     $sap_update_failed = 0;
     
+    error_log("SAP Creator: Starting variation creation for " . count($items) . " items in SWW: {$sww}");
 
     foreach ($items as $item) {
         $item_code = $item['ItemCode'] ?? '';
         
         if (empty($item_code)) {
+            error_log("SAP Creator: Skipping item with empty ItemCode");
             continue;
         }
         
         // Skip if variation already exists (has U_SiteItemID)
         if (!empty($item['U_SiteItemID'])) {
+            error_log("SAP Creator: Skipping {$item_code} - already has U_SiteItemID: " . $item['U_SiteItemID']);
             continue;
         }
+        
+        error_log("SAP Creator: Processing item {$item_code} - U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
         
         // Create variation for this specific item
         $variation_result = sap_create_variation($item, $parent_id, $token);
         
         if (is_wp_error($variation_result)) {
-            error_log("SAP Creator: Failed to create variation for {$item_code}: " . $variation_result->get_error_message());
+            error_log("SAP Creator: FAILED to create variation for {$item_code}: " . $variation_result->get_error_message());
             $sap_update_failed++;
         } else {
             $variations_created++;
+            error_log("SAP Creator: SUCCESS created variation ID {$variation_result['variation_id']} for {$item_code}");
             if (!$variation_result['sap_updated']) {
                 $sap_update_failed++;
+                error_log("SAP Creator: Warning - SAP update failed for {$item_code}");
             }
         }
     }
+
+    error_log("SAP Creator: Variation creation completed - Created: {$variations_created}, SAP Update Failed: {$sap_update_failed}");
     
     // CRITICAL: Clear product cache to ensure variations are visible (like creation_old.php)
     if ($variations_created > 0) {
@@ -457,15 +479,20 @@ function sap_create_variation($item, $parent_id, $token) {
     $item_code = $item['ItemCode'] ?? '';
     $item_name = $item['ItemName'] ?? '';
     
+    error_log("SAP Creator: === Creating variation for {$item_code} ===");
+    
     if (empty($item_code)) {
+        error_log("SAP Creator: ERROR - ItemCode is empty");
         return new WP_Error('invalid_data', 'ItemCode חסר');
     }
     
+    error_log("SAP Creator: Creating WC_Product_Variation for {$item_code}");
     $variation = new WC_Product_Variation();
     $variation->set_parent_id($parent_id);
     $variation->set_name($item_name); // Name from ItemName
     $variation->set_sku($item_code);
     $variation->set_status('pending'); // NOT published
+    error_log("SAP Creator: Basic variation properties set for {$item_code}");
     
     // Set price (SAP price × 1.18)
     $price_result = sap_set_product_price($variation, $item);
@@ -479,57 +506,55 @@ function sap_create_variation($item, $parent_id, $token) {
         error_log("SAP Creator: Stock error for variation {$item_code}: " . $stock_result->get_error_message());
     }
     
-    // Set variation attributes (only size and color) - match creation_old.php logic
+    // Set variation attributes (only size and color from U_ssize and U_scolor)
     $variation_attributes = [];
     
-    // Size attribute mapping with fallbacks (like creation_old.php)
-    $size_value = null;
-    if (!empty($item['U_EM_Size'])) {
-        $size_value = trim($item['U_EM_Size']);
-    } elseif (!empty($item['U_ssize'])) { // Fallback field
+    // Size attribute from U_ssize only
+    if (!empty($item['U_ssize'])) {
         $size_value = trim($item['U_ssize']);
-        error_log("SAP Creator: Using fallback size field U_ssize for item " . $item_code);
-    }
-    
-    if ($size_value) {
         $size_slug = sanitize_title($size_value);
         sap_ensure_term_exists('pa_size', $size_value, $size_slug);
         $variation_attributes['pa_size'] = $size_slug;
+        error_log("SAP Creator: Set size attribute '{$size_value}' for variation {$item_code}");
     }
     
-    // Color attribute mapping with fallbacks (like creation_old.php)
-    $color_value = null;
-    if (!empty($item['U_EM_Color'])) {
-        $color_value = trim($item['U_EM_Color']);
-    } elseif (!empty($item['U_scolor'])) { // Fallback field
+    // Color attribute from U_scolor only
+    if (!empty($item['U_scolor'])) {
         $color_value = trim($item['U_scolor']);
-        error_log("SAP Creator: Using fallback color field U_scolor for item " . $item_code);
-    }
-    
-    if ($color_value) {
         $color_slug = sanitize_title($color_value);
         sap_ensure_term_exists('pa_color', $color_value, $color_slug);
         $variation_attributes['pa_color'] = $color_slug;
+        error_log("SAP Creator: Set color attribute '{$color_value}' for variation {$item_code}");
     }
     
-    // Log if no attributes found (like creation_old.php)
+    // Log if no attributes found
     if (empty($variation_attributes)) {
-        error_log("SAP Creator: No attributes found for variation {$item_code} - U_EM_Size: " . ($item['U_EM_Size'] ?? 'not_set') . ", U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_EM_Color: " . ($item['U_EM_Color'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
+        error_log("SAP Creator: No attributes found for variation {$item_code} - U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
+    } else {
+        error_log("SAP Creator: Found attributes for variation {$item_code}: " . implode(', ', array_keys($variation_attributes)));
     }
     
     if (!empty($variation_attributes)) {
         $variation->set_attributes($variation_attributes);
+        error_log("SAP Creator: Set attributes for {$item_code}: " . json_encode($variation_attributes));
+    } else {
+        error_log("SAP Creator: WARNING - No attributes set for {$item_code}");
     }
     
     // Save variation
+    error_log("SAP Creator: Attempting to save variation for {$item_code}");
     $variation_id = $variation->save();
     
     if (!$variation_id) {
+        error_log("SAP Creator: CRITICAL ERROR - Failed to save variation for {$item_code}");
         return new WP_Error('save_failed', 'נכשל בשמירת וריאציה');
     }
     
+    error_log("SAP Creator: Successfully saved variation ID {$variation_id} for {$item_code}");
+    
     // Update SAP with IDs
     // U_SiteGroupID = Parent ID, U_SiteItemID = Variation ID
+    error_log("SAP Creator: Updating SAP with GroupID={$parent_id}, ItemID={$variation_id} for {$item_code}");
     $sap_updated = sap_update_item_ids($item_code, $parent_id, $variation_id, $token);
     
     return [
@@ -888,35 +913,28 @@ function sap_create_variation_attributes($items) {
     $size_values = [];
     $color_values = [];
     
-    // Collect all unique size and color values from items (match creation_old.php logic)
+    // Collect all unique size and color values from items (U_ssize and U_scolor only)
     foreach ($items as $item) {
-        // Size attribute with fallbacks
-        $size_value = null;
-        if (!empty($item['U_EM_Size'])) {
-            $size_value = trim($item['U_EM_Size']);
-        } elseif (!empty($item['U_ssize'])) { // Fallback field
-            $size_value = trim($item['U_ssize']);
+        $item_code = $item['ItemCode'] ?? 'unknown';
+        
+        // Size attribute from U_ssize only
+        if (!empty($item['U_ssize'])) {
+            $size_values[] = trim($item['U_ssize']);
+            error_log("SAP Creator: Found size '{$item['U_ssize']}' in item {$item_code}");
         }
         
-        if ($size_value) {
-            $size_values[] = $size_value;
-        }
-        
-        // Color attribute with fallbacks
-        $color_value = null;
-        if (!empty($item['U_EM_Color'])) {
-            $color_value = trim($item['U_EM_Color']);
-        } elseif (!empty($item['U_scolor'])) { // Fallback field
-            $color_value = trim($item['U_scolor']);
-        }
-        
-        if ($color_value) {
-            $color_values[] = $color_value;
+        // Color attribute from U_scolor only
+        if (!empty($item['U_scolor'])) {
+            $color_values[] = trim($item['U_scolor']);
+            error_log("SAP Creator: Found color '{$item['U_scolor']}' in item {$item_code}");
         }
     }
     
     $size_values = array_unique($size_values);
     $color_values = array_unique($color_values);
+    
+    error_log("SAP Creator: Unique sizes found: " . implode(', ', $size_values));
+    error_log("SAP Creator: Unique colors found: " . implode(', ', $color_values));
     
     // Size attribute (ID 4)
     if (!empty($size_values)) {
@@ -932,6 +950,7 @@ function sap_create_variation_attributes($items) {
         
         // Ensure size taxonomy exists and terms are created
         sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
+        error_log("SAP Creator: Created size attribute with values: " . implode(', ', $size_values));
     }
     
     // Color attribute (ID 3)
@@ -948,8 +967,10 @@ function sap_create_variation_attributes($items) {
         
         // Ensure color taxonomy exists and terms are created
         sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
+        error_log("SAP Creator: Created color attribute with values: " . implode(', ', $color_values));
     }
     
+    error_log("SAP Creator: Returning " . count($attributes_array) . " parent attributes: " . implode(', ', array_keys($attributes_array)));
     return $attributes_array;
 }
 

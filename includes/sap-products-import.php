@@ -644,20 +644,7 @@ if (!function_exists('sap_update_variations_from_api')) {
     
     sap_send_telegram_message($complete_message);
 
-    // Return both HTML output and structured data for background processor
-    $html_output = ob_get_clean();
-    
-    // If called from background processor, return structured data
-    if (defined('SAP_BACKGROUND_PROCESSING') && SAP_BACKGROUND_PROCESSING) {
-        return [
-            'html_output' => $html_output,
-            'stats' => $stats,
-            'failed_items' => $failed_items,
-            'success' => empty($failed_items) || $stats['errors'] == 0
-        ];
-    }
-    
-    return $html_output;
+    return ob_get_clean();
 }
 }
 

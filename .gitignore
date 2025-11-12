@@ -3,3 +3,7 @@
 *.backup
 
 creation_old.php
+
+/old-class-sap-background-processor.php
+
+/old-sap-products-import.php

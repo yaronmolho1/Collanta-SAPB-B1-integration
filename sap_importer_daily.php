@@ -135,7 +135,7 @@ function my_sap_importer_settings_page() {
             <label for="item_code_filter">קוד פריט ספציפי (אופציונלי):</label>
             <input type="text" id="item_code_filter" name="item_code_filter" placeholder="לדוגמה: 60010">
             <p>
-                <input type="submit" name="run_variation_import" class="button button-primary" value="הפעל יבוא וריאציות">
+                <input type="submit" name="run_variation_import" class="button button-primary" value="הפעל עדכון מלאי">
             </p>
         </form>
 
@@ -248,7 +248,7 @@ function my_sap_importer_settings_page() {
                 שלח את כל ההזמנות שבסטטוס "בטיפול" ועדיין לא נשלחו ל-סאפ:
             </p>
             <p>
-                <input type="submit" name="bulk_sap_send" class="button button-primary" value="שלח הזמנות לא מסונכרנות ל-SAP" onclick="return confirm('האם אתה בטוח שרוצה לשלוח את כל ההזמנות שלא סונכרנו ל-SAP?')">
+                <input type="submit" name="bulk_sap_send" class="button button-primary" value="שלח הזמנות לא מסונכרנות ל-סאפ P" onclick="return confirm('האם אתה בטוח שרוצה לשלוח את כל ההזמנות שלא סונכרנו ל-SAP?')">
             </p>
         </form>
 
@@ -362,7 +362,7 @@ function my_sap_importer_settings_page() {
             <label for="retry_order_id">מספר הזמנה:</label>
             <input type="number" id="retry_order_id" name="retry_order_id" placeholder="לדוגמה: 68063" min="1">
             <p>
-                <input type="submit" name="manual_sap_retry" class="button button-primary" value="שלח ל-SAP עכשיו" onclick="return confirm('האם אתה בטוח שרוצה לשלוח הזמנה זו ל-SAP?')">
+                <input type="submit" name="manual_sap_retry" class="button button-primary" value="שלח ל-סאפ עכשיו" onclick="return confirm('האם אתה בטוח שרוצה לשלוח הזמנה זו ל-SAP?')">
             </p>
         </form>
 
