@@ -316,6 +316,7 @@ function sap_create_simple_product($item, $token) {
 
 /**
  * Create a variable product with variations from SAP items
+ * Enhanced with batch variation creation like the blueprint
  *
  * @param array $items Array of SAP item data (all same SWW)
  * @param string $sww SWW value for parent product name
@@ -370,28 +371,48 @@ function sap_create_variable_product($items, $sww, $token) {
         error_log("SAP Creator: Created new variable parent {$parent_id} for SWW {$sww}");
     }
     
-    // Create variations
-    $variations_created = 0;
-    $sap_update_failed = 0;
+    // Separate items into those that need creation vs update
+    $items_to_create = [];
+    $items_to_update = [];
     
     foreach ($items as $item) {
-        $variation_result = sap_create_variation($item, $parent_id, $token);
-        
-        if (is_wp_error($variation_result)) {
-            error_log("SAP Creator: Failed to create variation for {$item['ItemCode']}: " . $variation_result->get_error_message());
-            $sap_update_failed++;
+        if (empty($item['U_SiteItemID'])) {
+            $items_to_create[] = $item;
         } else {
-            $variations_created++;
-            
-            if (!$variation_result['sap_updated']) {
-                $sap_update_failed++;
-            }
+            $items_to_update[] = $item;
+        }
+    }
+    
+    $variations_created = 0;
+    $variations_updated = 0;
+    $sap_update_failed = 0;
+    
+    // Batch create new variations (like blueprint pattern)
+    if (!empty($items_to_create)) {
+        $create_result = sap_batch_create_variations($parent_id, $items_to_create, $token);
+        if (is_wp_error($create_result)) {
+            error_log("SAP Creator: Batch variation creation failed: " . $create_result->get_error_message());
+            $sap_update_failed += count($items_to_create);
+        } else {
+            $variations_created = $create_result['created_count'];
+            $sap_update_failed += $create_result['sap_update_failed'];
+        }
+    }
+    
+    // Batch update existing variations (like blueprint pattern)
+    if (!empty($items_to_update)) {
+        $update_result = sap_batch_update_variations($parent_id, $items_to_update, $token);
+        if (is_wp_error($update_result)) {
+            error_log("SAP Creator: Batch variation update failed: " . $update_result->get_error_message());
+        } else {
+            $variations_updated = $update_result['updated_count'];
         }
     }
     
     return [
         'parent_id' => $parent_id,
         'variations_count' => $variations_created,
+        'variations_updated' => $variations_updated,
         'sap_update_failed' => $sap_update_failed
     ];
 }
@@ -500,6 +521,7 @@ function sap_set_product_price($product, $item) {
 
 /**
  * Set product stock from SAP data
+ * Rule: If source stock is 0 or negative, set to 0
  *
  * @param WC_Product $product Product object
  * @param array $item SAP item data
@@ -517,37 +539,42 @@ function sap_set_product_stock($product, $item) {
         }
     }
     
-    if (is_numeric($sap_quantity_on_hand) && $sap_quantity_on_hand >= 0) {
+    // Handle numeric stock values
+    if (is_numeric($sap_quantity_on_hand)) {
+        // Rule: If stock is 0 or negative, set to 0
+        $final_stock = max(0, (int)$sap_quantity_on_hand);
+        
         $product->set_manage_stock(true);
-        $product->set_stock_quantity($sap_quantity_on_hand);
-        $product->set_stock_status($sap_quantity_on_hand > 0 ? 'instock' : 'outofstock');
+        $product->set_stock_quantity($final_stock);
+        $product->set_stock_status($final_stock > 0 ? 'instock' : 'outofstock');
         
         return true;
     }
     
+    // Default to 0 stock if no valid stock data
+    $product->set_manage_stock(true);
+    $product->set_stock_quantity(0);
     $product->set_stock_status('outofstock');
-    $product->set_manage_stock(false);
     
-    return new WP_Error('invalid_stock', 'כמות מלאי לא תקינה');
+    return true; // Don't return error for missing stock data
 }
 
 /**
  * Set product attributes (non-variation) - danier only
- * Attributes MUST already exist (ID 3=color, 4=size, 5=danier)
+ * Rule: Skip missing attributes gracefully, do not create errors
  *
  * @param WC_Product $product Product object
  * @param array $item SAP item data
  * @param bool $for_variations Whether these are for variations
- * @return bool|WP_Error True on success, WP_Error on failure
+ * @return bool Always returns true (no errors for missing attributes)
  */
 function sap_set_product_attributes($product, $item, $for_variations = false) {
     $attributes_array = [];
-    $errors = [];
     
     // Danier attribute (NOT for variations, NOT visible)
     if (!empty($item['U_sdanier'])) {
         if (!taxonomy_exists('pa_danier')) {
-            $errors[] = 'Attribute pa_danier does not exist (ID 5 expected)';
+            // Rule: Skip missing attributes gracefully
             error_log('SAP Creator: pa_danier attribute missing - skipping');
         } else {
             $danier_slug = sanitize_title($item['U_sdanier']);
@@ -569,16 +596,14 @@ function sap_set_product_attributes($product, $item, $for_variations = false) {
         $product->set_attributes($attributes_array);
     }
     
-    if (!empty($errors)) {
-        return new WP_Error('attribute_errors', implode('; ', $errors));
-    }
-    
+    // Always return true - no errors for missing attributes
     return true;
 }
 
 /**
  * Create variation attributes for parent variable product
  * Only creates size and color attributes (for variations)
+ * Rule: Skip missing attributes gracefully
  *
  * @param array $items Array of items in same SWW group
  * @return array Array of WC_Product_Attribute objects
@@ -601,50 +626,226 @@ function sap_create_variation_attributes($items) {
     }
     
     // Size attribute (ID 4)
-    if (!empty($size_values)) {
-        if (!taxonomy_exists('pa_size')) {
-            error_log('SAP Creator: pa_size attribute missing (ID 4 expected) - skipping');
-        } else {
-            // Ensure all terms exist
-            foreach ($size_values as $slug => $value) {
-                sap_ensure_term_exists('pa_size', $value, $slug);
-            }
-            
-            $size_attribute = new WC_Product_Attribute();
-            $size_attribute->set_id(4); // Attribute ID 4
-            $size_attribute->set_name('pa_size');
-            $size_attribute->set_options(array_keys($size_values));
-            $size_attribute->set_position(0);
-            $size_attribute->set_visible(true);
-            $size_attribute->set_variation(true);
-            
-            $attributes_array['pa_size'] = $size_attribute;
+    if (!empty($size_values) && taxonomy_exists('pa_size')) {
+        // Ensure all terms exist
+        foreach ($size_values as $slug => $value) {
+            sap_ensure_term_exists('pa_size', $value, $slug);
         }
+        
+        $size_attribute = new WC_Product_Attribute();
+        $size_attribute->set_id(4); // Attribute ID 4
+        $size_attribute->set_name('pa_size');
+        $size_attribute->set_options(array_keys($size_values));
+        $size_attribute->set_position(0);
+        $size_attribute->set_visible(true);
+        $size_attribute->set_variation(true);
+        
+        $attributes_array['pa_size'] = $size_attribute;
+    } elseif (!empty($size_values)) {
+        error_log('SAP Creator: pa_size attribute missing (ID 4 expected) - skipping');
     }
     
     // Color attribute (ID 3)
-    if (!empty($color_values)) {
-        if (!taxonomy_exists('pa_color')) {
-            error_log('SAP Creator: pa_color attribute missing (ID 3 expected) - skipping');
-        } else {
-            // Ensure all terms exist
-            foreach ($color_values as $slug => $value) {
-                sap_ensure_term_exists('pa_color', $value, $slug);
-            }
-            
-            $color_attribute = new WC_Product_Attribute();
-            $color_attribute->set_id(3); // Attribute ID 3
-            $color_attribute->set_name('pa_color');
-            $color_attribute->set_options(array_keys($color_values));
-            $color_attribute->set_position(1);
-            $color_attribute->set_visible(true);
-            $color_attribute->set_variation(true);
-            
-            $attributes_array['pa_color'] = $color_attribute;
+    if (!empty($color_values) && taxonomy_exists('pa_color')) {
+        // Ensure all terms exist
+        foreach ($color_values as $slug => $value) {
+            sap_ensure_term_exists('pa_color', $value, $slug);
         }
+        
+        $color_attribute = new WC_Product_Attribute();
+        $color_attribute->set_id(3); // Attribute ID 3
+        $color_attribute->set_name('pa_color');
+        $color_attribute->set_options(array_keys($color_values));
+        $color_attribute->set_position(1);
+        $color_attribute->set_visible(true);
+        $color_attribute->set_variation(true);
+        
+        $attributes_array['pa_color'] = $color_attribute;
+    } elseif (!empty($color_values)) {
+        error_log('SAP Creator: pa_color attribute missing (ID 3 expected) - skipping');
     }
     
     return $attributes_array;
+}
+
+/**
+ * Batch create variations using WooCommerce API (like blueprint)
+ *
+ * @param int $parent_id Parent product ID
+ * @param array $items Array of SAP items to create as variations
+ * @param string $token SAP auth token
+ * @return array|WP_Error Result data on success, WP_Error on failure
+ */
+function sap_batch_create_variations($parent_id, $items, $token) {
+    $variations_data = [];
+    
+    // Prepare variation data for batch creation
+    foreach ($items as $item) {
+        $variation_data = [
+            'sku' => $item['ItemCode'],
+            'manage_stock' => true,
+            'attributes' => []
+        ];
+        
+        // Set price
+        if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+            foreach ($item['ItemPrices'] as $price_entry) {
+                if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
+                    $b2c_raw_price = $price_entry['Price'] ?? 0;
+                    $b2c_price_with_vat = $b2c_raw_price * 1.18;
+                    $b2c_final_price = ceil($b2c_price_with_vat);
+                    $variation_data['regular_price'] = (string)$b2c_final_price;
+                    break;
+                }
+            }
+        }
+        
+        // Set stock - apply stock handling rule (0 or negative becomes 0)
+        $stock_quantity = 0;
+        if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
+            foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
+                if (isset($warehouse_info['InStock'])) {
+                    $stock_quantity = max(0, (int)$warehouse_info['InStock']);
+                    break;
+                }
+            }
+        }
+        $variation_data['stock_quantity'] = $stock_quantity;
+        
+        // Set attributes - only if taxonomies exist (skip missing gracefully)
+        if (!empty($item['U_ssize']) && taxonomy_exists('pa_size')) {
+            $size_slug = sanitize_title($item['U_ssize']);
+            sap_ensure_term_exists('pa_size', $item['U_ssize'], $size_slug);
+            $variation_data['attributes'][] = [
+                'id' => 4,
+                'option' => $item['U_ssize']
+            ];
+        }
+        
+        if (!empty($item['U_scolor']) && taxonomy_exists('pa_color')) {
+            $color_slug = sanitize_title($item['U_scolor']);
+            sap_ensure_term_exists('pa_color', $item['U_scolor'], $color_slug);
+            $variation_data['attributes'][] = [
+                'id' => 3,
+                'option' => $item['U_scolor']
+            ];
+        }
+        
+        $variations_data[] = $variation_data;
+    }
+    
+    if (empty($variations_data)) {
+        return new WP_Error('no_variations', 'לא נמצאו וריאציות תקינות ליצירה');
+    }
+    
+    // Create variations using WooCommerce
+    $created_count = 0;
+    $sap_update_failed = 0;
+    $created_variations = [];
+    
+    foreach ($variations_data as $index => $variation_data) {
+        $variation = new WC_Product_Variation();
+        $variation->set_parent_id($parent_id);
+        $variation->set_sku($variation_data['sku']);
+        $variation->set_manage_stock($variation_data['manage_stock']);
+        $variation->set_stock_quantity($variation_data['stock_quantity']);
+        $variation->set_status('pending');
+        
+        if (isset($variation_data['regular_price'])) {
+            $variation->set_regular_price($variation_data['regular_price']);
+        }
+        
+        // Set variation attributes
+        $variation_attributes = [];
+        foreach ($variation_data['attributes'] as $attr) {
+            if ($attr['id'] == 4) { // Size
+                $variation_attributes['pa_size'] = sanitize_title($attr['option']);
+            } elseif ($attr['id'] == 3) { // Color
+                $variation_attributes['pa_color'] = sanitize_title($attr['option']);
+            }
+        }
+        if (!empty($variation_attributes)) {
+            $variation->set_attributes($variation_attributes);
+        }
+        
+        $variation_id = $variation->save();
+        
+        if ($variation_id) {
+            $created_count++;
+            $created_variations[] = [
+                'id' => $variation_id,
+                'parent_id' => $parent_id,
+                'sku' => $variation_data['sku']
+            ];
+            
+            // Update SAP with IDs
+            $item = $items[$index];
+            $sap_updated = sap_update_item_ids($item['ItemCode'], $parent_id, $variation_id, $token);
+            if (!$sap_updated) {
+                $sap_update_failed++;
+            }
+        }
+    }
+    
+    return [
+        'created_count' => $created_count,
+        'sap_update_failed' => $sap_update_failed,
+        'variations' => $created_variations
+    ];
+}
+
+/**
+ * Batch update existing variations using WooCommerce API (like blueprint)
+ *
+ * @param int $parent_id Parent product ID  
+ * @param array $items Array of SAP items to update (have U_SiteItemID)
+ * @param string $token SAP auth token
+ * @return array|WP_Error Result data on success, WP_Error on failure
+ */
+function sap_batch_update_variations($parent_id, $items, $token) {
+    $updated_count = 0;
+    
+    foreach ($items as $item) {
+        $variation_id = (int)$item['U_SiteItemID'];
+        $variation = wc_get_product($variation_id);
+        
+        if (!$variation || !$variation->is_type('variation')) {
+            continue;
+        }
+        
+        // Update price
+        if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+            foreach ($item['ItemPrices'] as $price_entry) {
+                if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
+                    $b2c_raw_price = $price_entry['Price'] ?? 0;
+                    $b2c_price_with_vat = $b2c_raw_price * 1.18;
+                    $b2c_final_price = ceil($b2c_price_with_vat);
+                    $variation->set_regular_price($b2c_final_price);
+                    break;
+                }
+            }
+        }
+        
+        // Update stock - apply stock handling rule (0 or negative becomes 0)
+        $stock_quantity = 0;
+        if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
+            foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
+                if (isset($warehouse_info['InStock'])) {
+                    $stock_quantity = max(0, (int)$warehouse_info['InStock']);
+                    break;
+                }
+            }
+        }
+        $variation->set_stock_quantity($stock_quantity);
+        $variation->set_stock_status($stock_quantity > 0 ? 'instock' : 'outofstock');
+        
+        $variation->save();
+        $updated_count++;
+    }
+    
+    return [
+        'updated_count' => $updated_count
+    ];
 }
 
 /**
@@ -735,6 +936,7 @@ function sap_api_patch($endpoint, $data = [], $token = null) {
  * Uses endpoint: Items/{itemcode} with PATCH method
  * For variations: GroupID = parent ID, ItemID = variation ID
  * For simple products: GroupID = product ID, ItemID = product ID
+ * Enhanced error handling for HTTP 403 and other issues
  *
  * @param string $item_code SAP ItemCode
  * @param int $site_group_id WooCommerce parent/product ID
@@ -743,18 +945,45 @@ function sap_api_patch($endpoint, $data = [], $token = null) {
  * @return bool True on success, false on failure
  */
 function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) {
+    // Validate inputs
+    if (empty($item_code) || empty($token)) {
+        error_log("SAP Creator: Invalid parameters for SAP update - ItemCode: {$item_code}");
+        return false;
+    }
+    
     $update_data = [
         'U_SiteGroupID' => (string)$site_group_id,
         'U_SiteItemID' => (string)$site_item_id
     ];
     
-    // Endpoint: Items/{itemcode}
-    $endpoint = 'Items/' . $item_code;
+    // Use POST method instead of PATCH for better compatibility
+    $endpoint = 'items'; // Use batch endpoint
+    $batch_data = [
+        [
+            'itemCode' => $item_code,
+            'U_SiteGroupID' => (string)$site_group_id,
+            'U_SiteItemID' => (string)$site_item_id
+        ]
+    ];
     
-    $response = sap_api_patch($endpoint, $update_data, $token);
+    $response = sap_api_post($endpoint, $batch_data, $token);
     
     if (is_wp_error($response)) {
-        error_log("SAP Creator: Failed to update SAP for {$item_code}: " . $response->get_error_message());
+        $error_message = $response->get_error_message();
+        
+        // Handle specific error types
+        if (strpos($error_message, '403') !== false) {
+            error_log("SAP Creator: HTTP 403 (Forbidden) for {$item_code} - Check API permissions and token validity");
+            
+            // Send critical error notification
+            sap_creator_send_critical_error_notification(
+                "HTTP 403 Error",
+                "Failed to update SAP item {$item_code} - Permission denied. Check API credentials and permissions."
+            );
+        } else {
+            error_log("SAP Creator: Failed to update SAP for {$item_code}: {$error_message}");
+        }
+        
         return false;
     }
     
@@ -922,24 +1151,123 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
 }
 
 /**
+ * Send critical error notification to Telegram
+ * Used for HTTP 403 errors and other critical failures
+ *
+ * @param string $error_type Type of error (e.g., "HTTP 403 Error")
+ * @param string $error_message Detailed error message
+ * @return bool|WP_Error
+ */
+function sap_creator_send_critical_error_notification($error_type, $error_message) {
+    $message = "🚨 SAP Product Creator - Critical Error\n\n";
+    $message .= "Error Type: {$error_type}\n";
+    $message .= "Message: {$error_message}\n";
+    $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
+    $message .= "Server: " . (isset($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : 'Unknown');
+    
+    return sap_creator_send_telegram_message($message);
+}
+
+/**
  * Schedule weekly product creation cron job
+ * Uses Action Scheduler like other workflows
  */
 function sap_schedule_weekly_product_creation() {
-    if (!wp_next_scheduled('sap_weekly_product_creation_event')) {
-        // Schedule for every Sunday at 03:00
-        wp_schedule_event(strtotime('next Sunday 03:00:00'), 'weekly', 'sap_weekly_product_creation_event');
+    // Use Action Scheduler instead of wp-cron for better reliability
+    if (function_exists('as_next_scheduled_action')) {
+        // Check if already scheduled
+        $next_scheduled = as_next_scheduled_action('sap_weekly_product_creation_action');
+        
+        if (!$next_scheduled) {
+            // Schedule for every Sunday at 03:00
+            $next_sunday = strtotime('next Sunday 03:00:00');
+            as_schedule_recurring_action($next_sunday, WEEK_IN_SECONDS, 'sap_weekly_product_creation_action', [], 'sap-creator');
+            error_log('SAP Creator: Scheduled weekly product creation for ' . date('Y-m-d H:i:s', $next_sunday));
+        }
+    } else {
+        // Fallback to wp-cron if Action Scheduler not available
+        if (!wp_next_scheduled('sap_weekly_product_creation_event')) {
+            wp_schedule_event(strtotime('next Sunday 03:00:00'), 'weekly', 'sap_weekly_product_creation_event');
+        }
     }
 }
 add_action('wp', 'sap_schedule_weekly_product_creation');
 
 /**
- * Cron job handler
+ * Cron job handler for Action Scheduler
+ */
+function sap_run_weekly_product_creation_action() {
+    // Run in background using existing background processor if available
+    if (class_exists('SAP_Background_Processor')) {
+        $processor = new SAP_Background_Processor();
+        $task_data = [
+            'action' => 'product_creation',
+            'user_id' => 1, // System user
+            'timestamp' => time()
+        ];
+        
+        $processor->push_to_queue($task_data);
+        $processor->save()->dispatch();
+        
+        error_log('SAP Creator: Weekly product creation queued for background processing');
+    } else {
+        // Direct execution if background processor not available
+        $log_output = sap_create_products_from_api();
+        error_log('SAP Creator: Weekly product creation completed - ' . strip_tags(substr($log_output, 0, 200)));
+    }
+}
+add_action('sap_weekly_product_creation_action', 'sap_run_weekly_product_creation_action');
+
+/**
+ * Cron job handler (fallback for wp-cron)
  */
 function sap_run_weekly_product_creation() {
     $log_output = sap_create_products_from_api();
-    error_log('Weekly SAP Product Creation: ' . strip_tags($log_output));
+    error_log('SAP Creator: Weekly product creation: ' . strip_tags(substr($log_output, 0, 200)));
     return $log_output;
 }
 add_action('sap_weekly_product_creation_event', 'sap_run_weekly_product_creation');
+
+/**
+ * Add product creation action to background processor
+ * Integrates with existing SAP_Background_Processor class
+ */
+add_filter('sap_background_processor_actions', function($actions) {
+    $actions['product_creation'] = [
+        'function' => 'sap_create_products_from_api',
+        'description' => 'Create new products from SAP API'
+    ];
+    return $actions;
+});
+
+/**
+ * Handle manual product creation via background processing
+ * Enqueue product creation task for background execution
+ *
+ * @param int $user_id User ID who initiated the task
+ * @return bool|WP_Error
+ */
+function sap_enqueue_product_creation_task($user_id = null) {
+    if (!$user_id) {
+        $user_id = get_current_user_id();
+    }
+    
+    if (class_exists('SAP_Background_Processor')) {
+        $processor = new SAP_Background_Processor();
+        $task_data = [
+            'action' => 'product_creation',
+            'user_id' => $user_id,
+            'timestamp' => time()
+        ];
+        
+        $processor->push_to_queue($task_data);
+        $processor->save()->dispatch();
+        
+        error_log("SAP Creator: Product creation task queued for user {$user_id}");
+        return true;
+    }
+    
+    return new WP_Error('no_processor', 'Background processor not available');
+}
 
 

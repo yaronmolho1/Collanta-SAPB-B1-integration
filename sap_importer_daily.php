@@ -215,9 +215,26 @@ function my_sap_importer_settings_page() {
         // טיפול בהפעלת יבוא מוצרים ידני - DISABLED ACTION SCHEDULER FOR TESTING
         if (isset($_POST['run_manual_product_import']) && current_user_can('manage_options') && check_admin_referer('run_sap_manual_product_import', 'sap_manual_product_import_nonce')) {
             
-            // Execute new product creation function directly
-            echo '<div class="notice notice-info"><p>📦 <strong>מפעיל יצירת מוצרים חדשים מ-SAP</strong> - רק פריטים שלא קיימים ב-WooCommerce יתווספו.</p></div>';
-            echo sap_create_products_from_api();
+            // Check if background processing is available
+            if (class_exists('SAP_Background_Processor') && method_exists('SAP_Background_Processor', 'queue_product_import')) {
+                // Use background processing
+                $job_id = SAP_Background_Processor::queue_product_import();
+                
+                if ($job_id) {
+                    echo '<div class="notice notice-success"><p>✅ <strong>משימת יצירת מוצרים הועברה לעיבוד ברקע</strong><br>';
+                    echo 'Job ID: ' . $job_id . '<br>';
+                    echo '📱 תקבל הודעת טלגרם כשהמשימה תסתיים.<br>';
+                    echo '⏱️ המשימה תתחיל לרוץ תוך 30 שניות.</p></div>';
+                } else {
+                    echo '<div class="notice notice-warning"><p>⚠️ <strong>לא ניתן היה לתזמן משימה ברקע</strong><br>';
+                    echo 'מריץ ביצוע ישיר במקום...</p></div>';
+                    echo sap_create_products_from_api();
+                }
+            } else {
+                // Fallback to direct execution
+                echo '<div class="notice notice-info"><p>📦 <strong>מפעיל יצירת מוצרים חדשים מ-SAP</strong> - רק פריטים שלא קיימים ב-WooCommerce יתווספו.</p></div>';
+                echo sap_create_products_from_api();
+            }
             
             /* COMMENTED OUT - Action Scheduler code causing count() error
             // Check if background processing is available
