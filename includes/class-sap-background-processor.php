@@ -26,7 +26,7 @@ class SAP_Background_Processor {
     /**
      * Telegram credentials for notifications
      */
-    private static $telegram_token = '8456245551:AAFv07KtOAA4OFTp1y1oGru8Q2egh9CWEJo';
+    private static $telegram_token = '8309945060:AAHKHfGtTf6D_U_JnapGrTHxOLcuht9ULA4';
     private static $telegram_chat_id = '5418067438';
     
     /**
