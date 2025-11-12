@@ -17,7 +17,8 @@ define('SAP_CREATOR_TELEGRAM_CHAT_ID', '5418067438');
 
 /**
  * Main function to create new products from SAP API
- * Only processes items where U_SiteGroupID OR U_SiteItemID is null (not yet in WooCommerce)
+ * Pulls all items from SAP, then processes only items where U_SiteGroupID OR U_SiteItemID is null
+ * This allows better handling of SWW groups where some items may already be imported
  *
  * @return string HTML output of the creation status
  */
@@ -51,13 +52,9 @@ if (!function_exists('sap_create_products_from_api')) {
 
         echo "<p style='color: green;'>✅ התחברות ל-SAP API בוצעה בהצלחה.</p>";
 
-        // 2. Retrieve items where U_SiteGroupID OR U_SiteItemID is null
-        // CRITICAL ISSUE: This filter only gets items with NULL IDs
-        // If there are other items with the SAME SWW that already have IDs assigned,
-        // they won't be included in this response, which could cause:
-        // - Incomplete variable product creation (missing variations)
-        // - Creating duplicate parents when variations already exist
-        // TODO: Consider doing a secondary check per SWW group to verify all items are included
+        // 2. Retrieve all items from SAP (no filtering)
+        // This allows us to see complete SWW groups and handle cases where
+        // some items in a group are already imported while others are not
         $itemsRequest = [
             "selectObjects" => [
                 ["field" => "ItemCode"],
@@ -84,21 +81,6 @@ if (!function_exists('sap_create_products_from_api')) {
                     "fieldType" => "string",
                     "operator" => "!=",
                     "fieldValue" => "0"
-                ],
-                [
-                    "field" => "U_SiteGroupID",
-                    "fieldType" => "string",
-                    "operator" => "=",
-                    "fieldValue" => null
-                ],
-                [
-                    "logicalOperator" => "OR"
-                ],
-                [
-                    "field" => "U_SiteItemID",
-                    "fieldType" => "string",
-                    "operator" => "=",
-                    "fieldValue" => null
                 ]
             ],
             "orderByObjects" => [
@@ -113,7 +95,7 @@ if (!function_exists('sap_create_products_from_api')) {
             ]
         ];
 
-        echo "<p>⏳ שולח בקשה ל-SAP API לשליפת פריטים חדשים...</p>";
+        echo "<p>⏳ שולח בקשה ל-SAP API לשליפת כל הפריטים...</p>";
         echo "<p><strong>ממתין לתגובת SAP מזורמת (עשוי לקחת עד 30 שניות)...</strong></p>";
         flush();
 
@@ -137,22 +119,52 @@ if (!function_exists('sap_create_products_from_api')) {
         $items = sap_parse_items_response($itemsResponse);
         
         if (empty($items)) {
-            echo "<p style='color: orange;'>לא נמצאו פריטים חדשים ליצירה ב-SAP.</p>";
+            echo "<p style='color: orange;'>לא נמצאו פריטים ב-SAP.</p>";
             
-            $empty_message = "✓ SAP Product Creation - No New Items\n";
-            $empty_message .= "Result: No items found with NULL U_SiteGroupID or U_SiteItemID\n";
+            $empty_message = "✓ SAP Product Creation - No Items Found\n";
+            $empty_message .= "Result: No items found in SAP API\n";
             $empty_message .= "Time: " . current_time('Y-m-d H:i:s');
             sap_creator_send_telegram_message($empty_message);
             
             return ob_get_clean();
         }
 
-        echo "<p>נמצאו " . count($items) . " פריטים חדשים ב-SAP API.</p>";
+        echo "<p>נמצאו " . count($items) . " פריטים ב-SAP API.</p>";
+        
+        // 4. Filter items - only process items where at least one of U_SiteGroupID or U_SiteItemID is null/empty
+        $filtered_items = [];
+        $skipped_count = 0;
+        
+        foreach ($items as $item) {
+            $site_group_id = $item['U_SiteGroupID'] ?? '';
+            $site_item_id = $item['U_SiteItemID'] ?? '';
+            
+            // Process if at least one ID is empty/null (meaning not fully imported)
+            if (empty($site_group_id) || empty($site_item_id)) {
+                $filtered_items[] = $item;
+            } else {
+                $skipped_count++;
+            }
+        }
+        
+        echo "<p>מסנן פריטים: " . count($filtered_items) . " פריטים לעיבוד, " . $skipped_count . " פריטים שכבר מיובאים.</p>";
+        
+        if (empty($filtered_items)) {
+            echo "<p style='color: orange;'>כל הפריטים כבר מיובאים ב-WooCommerce.</p>";
+            
+            $empty_message = "✓ SAP Product Creation - All Items Already Imported\n";
+            $empty_message .= "Result: All " . count($items) . " items already have U_SiteGroupID and U_SiteItemID\n";
+            $empty_message .= "Time: " . current_time('Y-m-d H:i:s');
+            sap_creator_send_telegram_message($empty_message);
+            
+            return ob_get_clean();
+        }
+        
         echo "<h3>פרטי יצירה:</h3>";
 
-        // 4. Group items by SWW
+        // 5. Group filtered items by SWW
         $sww_groups = [];
-        foreach ($items as $item) {
+        foreach ($filtered_items as $item) {
             $sww = $item['SWW'] ?? '';
             if (empty($sww)) {
                 error_log("SAP Creator: Item {$item['ItemCode']} has empty SWW, skipping");
@@ -180,7 +192,7 @@ if (!function_exists('sap_create_products_from_api')) {
         $creation_log = [];
         $error_log = [];
 
-        // 5. Process each SWW group
+        // 6. Process each SWW group
         foreach ($sww_groups as $sww => $group_items) {
             echo "<li><strong>SWW: " . esc_html($sww) . "</strong> (" . count($group_items) . " פריטים)<br>";
             
