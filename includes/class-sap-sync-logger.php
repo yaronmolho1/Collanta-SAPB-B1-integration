@@ -379,6 +379,24 @@ class SAP_Sync_Logger {
     public static function manual_retry($order_id, $confirmed = false) {
         error_log("SAP Manual Retry: Starting manual retry for order $order_id");
         
+        // Check order status FIRST - before anything else
+        $order = wc_get_order($order_id);
+        if (!$order) {
+            return [
+                'success' => false,
+                'message' => 'Order not found.'
+            ];
+        }
+        
+        // Block manual retry for received orders - they've already been successfully sent to SAP
+        if ($order->get_status() === 'received') {
+            error_log("SAP Manual Retry: BLOCKED - Order $order_id has 'received' status (already in SAP)");
+            return [
+                'success' => false,
+                'message' => 'Cannot retry order with "received" status. This order has already been successfully sent to SAP.'
+            ];
+        }
+        
         $sync_record = self::get_sync_status($order_id);
         
         if (!$sync_record) {
@@ -605,7 +623,12 @@ function sap_sync_status_meta_box($post_or_order) {
     // Manual retry button
     echo '<hr style="margin: 15px 0;">';
     
-    if ($sync_status->sync_status === 'in_progress') {
+    // Check order status - block retry for received orders
+    $order = wc_get_order($order_id);
+    if ($order && $order->get_status() === 'received') {
+        echo '<p><strong style="color: #00a32a;">✅ Order Successfully in SAP</strong><br>';
+        echo '<small>This order has been successfully sent to SAP and cannot be retried. Order status is "Received".</small></p>';
+    } elseif ($sync_status->sync_status === 'in_progress') {
         // Check if stuck for more than 5 minutes
         $last_attempt = strtotime($sync_status->last_attempt_time);
         $now = current_time('timestamp');
