@@ -126,12 +126,11 @@ function my_sap_importer_settings_page() {
         echo '</div>';
         ?>
 
-        <h2>יבוא ועדכון וריאציות מוצרים מ-SAP</h2>
+        <h2>סנכרון מלאי</h2>
         <form method="post" action="">
             <?php wp_nonce_field('run_sap_variation_import', 'sap_variation_import_nonce'); ?>
             <p>
-                לחץ על הכפתור למטה כדי להפעיל יבוא ועדכון וריאציות מוצרים מ-SAP.<br>
-                <strong>📱 חדש:</strong> המשימה תרוץ ברקע ותקבל הודעת טלגרם כשתסתיים!
+                סנכרון מלאי - לחץ להפעלת התהליך<br>
             </p>
             <label for="item_code_filter">קוד פריט ספציפי (אופציונלי):</label>
             <input type="text" id="item_code_filter" name="item_code_filter" placeholder="לדוגמה: 60010">
@@ -198,13 +197,13 @@ function my_sap_importer_settings_page() {
 
         <hr>
 
-        <h2>יבוא מוצרים חדשים מ-SAP (ידני)</h2>
+        <h2> ייבוא מוצרים חדשים (הפעלה ידנית)</h2>
         <form method="post" action="">
             <?php wp_nonce_field('run_sap_manual_product_import', 'sap_manual_product_import_nonce'); ?>
             <p>
-                לחץ על הכפתור למטה כדי להפעיל יצירת מוצרים חדשים מ-SAP.<br>
-                פעולה זו תיצור מוצרים חדשים בלבד (מקובצים לפי SWW) שעדיין לא קיימים ב-WooCommerce.<br>
-                <strong>📱 הודעות:</strong> תקבל הודעת טלגרם עם סיכום התוצאות!
+                
+                פעולה זו תיצור מוצרים חדשים בלבד (מקובצים לפי SWW) שעדיין לא קיימים ב- בווקומרס.<br>
+                
             </p>
             <p>
                 <input type="submit" name="run_manual_product_import" class="button button-primary" value="הפעל יבוא מוצרים חדשים">
@@ -242,11 +241,11 @@ function my_sap_importer_settings_page() {
 
         <hr>
 
-        <h2>שליחה קבוצתית ל-SAP</h2>
+        <h2>שליחה קבוצתית של הזמנות ל-סאפ</h2>
         <form method="post" action="">
             <?php wp_nonce_field('bulk_sap_send', 'bulk_sap_send_nonce'); ?>
             <p>
-                שלח את כל ההזמנות שבסטטוס "Processing" ועדיין לא נשלחו ל-SAP:
+                שלח את כל ההזמנות שבסטטוס "בטיפול" ועדיין לא נשלחו ל-סאפ:
             </p>
             <p>
                 <input type="submit" name="bulk_sap_send" class="button button-primary" value="שלח הזמנות לא מסונכרנות ל-SAP" onclick="return confirm('האם אתה בטוח שרוצה לשלוח את כל ההזמנות שלא סונכרנו ל-SAP?')">
@@ -354,11 +353,11 @@ function my_sap_importer_settings_page() {
 
         <hr>
 
-        <h3>שליחה ידנית ל-SAP</h3>
+        <h3>שליחת הזמנה ידנית ל-סאפ</h3>
         <form method="post" action="">
             <?php wp_nonce_field('manual_sap_retry', 'manual_sap_retry_nonce'); ?>
             <p>
-                כפה שליחה של הזמנה ל-SAP (מעדכן סטטוס ושולח מחדש):
+                כפה שליחה של הזמנה ל-סאפ (מעדכן סטטוס ושולח מחדש):
             </p>
             <label for="retry_order_id">מספר הזמנה:</label>
             <input type="number" id="retry_order_id" name="retry_order_id" placeholder="לדוגמה: 68063" min="1">

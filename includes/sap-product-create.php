@@ -423,6 +423,20 @@ function sap_create_variable_product($items, $sww, $token) {
         }
     }
     
+    // CRITICAL: Clear product cache to ensure variations are visible (like creation_old.php)
+    if ($variations_created > 0) {
+        wc_delete_product_transients($parent_id);
+        
+        // Update parent product price range after adding variations (like creation_old.php)
+        $parent_product = wc_get_product($parent_id);
+        if ($parent_product && $parent_product->is_type('variable')) {
+            $parent_product->sync(false); // Sync variation prices to parent
+            $parent_product->save(); // Save after sync
+        }
+        
+        error_log("SAP Creator: Synced parent product {$parent_id} with {$variations_created} variations");
+    }
+    
     return [
         'parent_id' => $parent_id,
         'variations_count' => $variations_created,
@@ -465,23 +479,42 @@ function sap_create_variation($item, $parent_id, $token) {
         error_log("SAP Creator: Stock error for variation {$item_code}: " . $stock_result->get_error_message());
     }
     
-    // Set variation attributes (only size and color)
+    // Set variation attributes (only size and color) - match creation_old.php logic
     $variation_attributes = [];
     
-    // Size attribute from U_ssize
-    if (!empty($item['U_ssize'])) {
+    // Size attribute mapping with fallbacks (like creation_old.php)
+    $size_value = null;
+    if (!empty($item['U_EM_Size'])) {
+        $size_value = trim($item['U_EM_Size']);
+    } elseif (!empty($item['U_ssize'])) { // Fallback field
         $size_value = trim($item['U_ssize']);
+        error_log("SAP Creator: Using fallback size field U_ssize for item " . $item_code);
+    }
+    
+    if ($size_value) {
         $size_slug = sanitize_title($size_value);
         sap_ensure_term_exists('pa_size', $size_value, $size_slug);
         $variation_attributes['pa_size'] = $size_slug;
     }
     
-    // Color attribute from U_scolor
-    if (!empty($item['U_scolor'])) {
+    // Color attribute mapping with fallbacks (like creation_old.php)
+    $color_value = null;
+    if (!empty($item['U_EM_Color'])) {
+        $color_value = trim($item['U_EM_Color']);
+    } elseif (!empty($item['U_scolor'])) { // Fallback field
         $color_value = trim($item['U_scolor']);
+        error_log("SAP Creator: Using fallback color field U_scolor for item " . $item_code);
+    }
+    
+    if ($color_value) {
         $color_slug = sanitize_title($color_value);
         sap_ensure_term_exists('pa_color', $color_value, $color_slug);
         $variation_attributes['pa_color'] = $color_slug;
+    }
+    
+    // Log if no attributes found (like creation_old.php)
+    if (empty($variation_attributes)) {
+        error_log("SAP Creator: No attributes found for variation {$item_code} - U_EM_Size: " . ($item['U_EM_Size'] ?? 'not_set') . ", U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_EM_Color: " . ($item['U_EM_Color'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
     }
     
     if (!empty($variation_attributes)) {
@@ -855,16 +888,30 @@ function sap_create_variation_attributes($items) {
     $size_values = [];
     $color_values = [];
     
-    // Collect all unique size and color values from items
+    // Collect all unique size and color values from items (match creation_old.php logic)
     foreach ($items as $item) {
-        // Size attribute from U_ssize
-        if (!empty($item['U_ssize'])) {
-            $size_values[] = trim($item['U_ssize']);
+        // Size attribute with fallbacks
+        $size_value = null;
+        if (!empty($item['U_EM_Size'])) {
+            $size_value = trim($item['U_EM_Size']);
+        } elseif (!empty($item['U_ssize'])) { // Fallback field
+            $size_value = trim($item['U_ssize']);
         }
         
-        // Color attribute from U_scolor
-        if (!empty($item['U_scolor'])) {
-            $color_values[] = trim($item['U_scolor']);
+        if ($size_value) {
+            $size_values[] = $size_value;
+        }
+        
+        // Color attribute with fallbacks
+        $color_value = null;
+        if (!empty($item['U_EM_Color'])) {
+            $color_value = trim($item['U_EM_Color']);
+        } elseif (!empty($item['U_scolor'])) { // Fallback field
+            $color_value = trim($item['U_scolor']);
+        }
+        
+        if ($color_value) {
+            $color_values[] = $color_value;
         }
     }
     
