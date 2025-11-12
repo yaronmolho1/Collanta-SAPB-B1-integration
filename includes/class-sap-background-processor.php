@@ -273,10 +273,10 @@ class SAP_Background_Processor {
             self::store_job_info($job_id, 'stock_update', $job_args);
             
             // Send start notification
-            $filter_text = !empty($item_code_filter) ? " (Item: {$item_code_filter})" : " (All items)";
+            $filter_text = !empty($item_code_filter) ? " (פריט: {$item_code_filter})" : " (כל הפריטים)";
             self::send_telegram_notification(
-                "🔄 Stock Update Queued",
-                "Stock update job queued successfully{$filter_text}.\nJob ID: {$job_id}\nUser: " . wp_get_current_user()->display_name . "\nExecution: " . date('H:i:s', $schedule_time)
+                "עדכון מלאי נכנס לתור",
+                "עדכון מלאי נכנס לתור בהצלחה{$filter_text}.\nמזהה משימה: {$job_id}\nמשתמש: " . wp_get_current_user()->display_name . "\nביצוע: " . date('H:i:s', $schedule_time)
             );
             
             // NO MORE force_process_queue() - let WP-Cron handle it asynchronously
@@ -352,25 +352,25 @@ class SAP_Background_Processor {
             // Extract job completion info
             $success = !empty($result) && strpos($result, 'שגיאה') === false;
             
-            // Send completion notification
-            $status = $success ? "✅ SUCCESS" : "❌ FAILED";
-            $message = "Product Creation Completed\n\n";
-            $message .= "Status: {$status}\n";
-            $message .= "User: " . get_user_by('id', $args['user_id'])->display_name . "\n";
-            $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
+            // Send completion notification in Hebrew
+            $status_text = $success ? "הושלם בהצלחה" : "הושלם עם שגיאות";
+            $title = "יצירת מוצרים מ-SAP {$status_text}";
+            
+            $message = "\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
+            $message .= "\nזמן: " . current_time('Y-m-d H:i:s');
             
             if (!empty($args['item_code_filter'])) {
-                $message .= "Filter: {$args['item_code_filter']}\n";
+                $message .= "\nמסנן: {$args['item_code_filter']}";
             }
             
             // Add summary if available
             if (!empty($output)) {
                 $clean_output = strip_tags($output);
                 $summary = substr($clean_output, 0, 200);
-                $message .= "\nSummary: {$summary}...";
+                $message .= "\n\nתקציר: {$summary}...";
             }
             
-            self::send_telegram_notification("Product Creation Complete", $message);
+            self::send_telegram_notification($title, $message);
             
             error_log('SAP Background Processor: Product import job completed successfully');
             
@@ -380,8 +380,8 @@ class SAP_Background_Processor {
             
             // Send error notification
             self::send_telegram_notification(
-                "❌ Product Creation Failed",
-                "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
+                "יצירת מוצרים מ-SAP נכשלה",
+                "שגיאה: {$error_msg}\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name . "\nזמן: " . current_time('Y-m-d H:i:s')
             );
         }
     }
@@ -415,25 +415,41 @@ class SAP_Background_Processor {
             // Extract job completion info
             $success = !empty($result) && strpos($result, 'שגיאה') === false;
             
-            // Send completion notification
-            $status = $success ? "✅ SUCCESS" : "❌ FAILED";
-            $message = "Stock Update Completed\n\n";
-            $message .= "Status: {$status}\n";
-            $message .= "User: " . get_user_by('id', $args['user_id'])->display_name . "\n";
-            $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
+            // Send completion notification in Hebrew format (like the old format)
+            $status_text = $success ? "הושלם בהצלחה" : "הושלם עם שגיאות";
+            $title = "עדכון מלאי מ-SAP {$status_text}";
             
-            if (!empty($item_code_filter)) {
-                $message .= "Filter: {$item_code_filter}\n";
-            }
-            
-            // Add summary if available
+            // Parse summary from output if available
+            $message = "";
             if (!empty($output)) {
                 $clean_output = strip_tags($output);
-                $summary = substr($clean_output, 0, 200);
-                $message .= "\nSummary: {$summary}...";
+                // Try to extract numbers from the output
+                if (preg_match('/פריטים שעובדו: (\d+)/', $clean_output, $matches)) {
+                    $processed = $matches[1] ?? 0;
+                    $message .= "\nפריטים שעובדו: {$processed}";
+                }
+                if (preg_match('/מלאי עודכן: (\d+)/', $clean_output, $matches)) {
+                    $updated = $matches[1] ?? 0;
+                    $message .= "\nמלאי עודכן: {$updated}";
+                }
+                if (preg_match('/נכשלו: (\d+)/', $clean_output, $matches)) {
+                    $failed = $matches[1] ?? 0;
+                    $message .= "\nנכשלו: {$failed}";
+                }
+                if (preg_match('/שגיאות: (\d+)/', $clean_output, $matches)) {
+                    $errors = $matches[1] ?? 0;
+                    $message .= "\nשגיאות: {$errors}";
+                }
             }
             
-            self::send_telegram_notification("Stock Update Complete", $message);
+            if (!empty($item_code_filter)) {
+                $message .= "\n\nמסנן: {$item_code_filter}";
+            }
+            
+            $message .= "\n\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
+            $message .= "\nזמן: " . current_time('Y-m-d H:i:s');
+            
+            self::send_telegram_notification($title, $message);
             
             error_log('SAP Background Processor: Stock update job completed successfully');
             
@@ -443,8 +459,8 @@ class SAP_Background_Processor {
             
             // Send error notification
             self::send_telegram_notification(
-                "❌ Stock Update Failed",
-                "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
+                "עדכון מלאי מ-SAP נכשל",
+                "שגיאה: {$error_msg}\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name . "\nזמן: " . current_time('Y-m-d H:i:s')
             );
         }
     }
@@ -576,7 +592,7 @@ class SAP_Background_Processor {
             return;
         }
         
-        $full_message = "🔔 *{$title}*\n\n{$message}";
+        $full_message = "*{$title}*\n\n{$message}";
         
         $url = "https://api.telegram.org/bot" . self::$telegram_token . "/sendMessage";
         $data = [
@@ -602,13 +618,13 @@ class SAP_Background_Processor {
             $job_id = isset($_GET['job_id']) ? intval($_GET['job_id']) : 0;
             
             $notices = [
-                'product_import' => 'Product import job queued successfully! You can continue using the site - you\'ll receive a Telegram notification when complete.',
-                'order_integration' => 'Order integration job queued successfully!'
+                'product_import' => 'משימת יבוא מוצרים נכנסה לתור בהצלחה! תוכל להמשיך לעבוד באתר - תקבל התראת טלגרם כשהיא תסתיים.',
+                'order_integration' => 'משימת אינטגרציית הזמנות נכנסה לתור בהצלחה!'
             ];
             
             if (isset($notices[$job_type])) {
                 echo '<div class="notice notice-success is-dismissible">';
-                echo '<p><strong>✅ ' . $notices[$job_type] . '</strong></p>';
+                echo '<p><strong>' . $notices[$job_type] . '</strong></p>';
                 if ($job_id) {
                     echo '<p><small>Job ID: ' . $job_id . '</small></p>';
                 }
