@@ -407,49 +407,69 @@ class SAP_Background_Processor {
             // Get item code filter if provided
             $item_code_filter = isset($args['item_code_filter']) ? $args['item_code_filter'] : null;
             
-            // Start output buffering to capture the result
-            ob_start();
+            // Define constant to get structured data from the function
+            if (!defined('SAP_BACKGROUND_PROCESSING')) {
+                define('SAP_BACKGROUND_PROCESSING', true);
+            }
+            
+            // Call the stock update function
             $result = sap_update_variations_from_api($item_code_filter);
-            $output = ob_get_clean();
             
-            // Extract job completion info
-            $success = !empty($result) && strpos($result, 'שגיאה') === false;
-            
-            // Send completion notification in Hebrew format (like the old format)
-            $status_text = $success ? "הושלם בהצלחה" : "הושלם עם שגיאות";
-            $title = "עדכון מלאי מ-SAP {$status_text}";
-            
-            // Parse summary from output if available
-            $message = "";
-            if (!empty($output)) {
-                $clean_output = strip_tags($output);
-                // Try to extract numbers from the output
-                if (preg_match('/פריטים שעובדו: (\d+)/', $clean_output, $matches)) {
-                    $processed = $matches[1] ?? 0;
-                    $message .= "\nפריטים שעובדו: {$processed}";
+            // Check if we got structured data (new format) or just HTML (old format)
+            if (is_array($result) && isset($result['stats']) && isset($result['failed_items'])) {
+                // New structured format - use exact same notification logic as sap-products-import.php
+                $stats = $result['stats'];
+                $failed_items = $result['failed_items'];
+                
+                // Send completion notification using EXACT same format as sap-products-import.php
+                if (empty($failed_items)) {
+                    // Success - all items updated
+                    $complete_message = "עדכון מלאי מ-SAP הושלם בהצלחה\n\n";
+                    $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
+                    $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                    $complete_message .= "זמן: " . current_time('Y-m-d H:i:s');
+                } else {
+                    // Partial failure - list failed items
+                    $complete_message = "עדכון מלאי מ-SAP הושלם עם שגיאות\n\n";
+                    $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
+                    $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                    $complete_message .= "נכשלו: {$stats['not_found']}\n";
+                    $complete_message .= "שגיאות: {$stats['errors']}\n\n";
+                    
+                    $complete_message .= "פריטים שנכשלו:\n";
+                    foreach ($failed_items as $failed) {
+                        $complete_message .= "- {$failed['item_code']} ({$failed['reason']})\n";
+                    }
+                    
+                    $complete_message .= "\nזמן: " . current_time('Y-m-d H:i:s');
                 }
-                if (preg_match('/מלאי עודכן: (\d+)/', $clean_output, $matches)) {
-                    $updated = $matches[1] ?? 0;
-                    $message .= "\nמלאי עודכן: {$updated}";
+                
+                // Add user info for background processing
+                $complete_message .= "\n\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
+                
+                // Send using the same telegram function as sap-products-import.php
+                if (function_exists('sap_send_telegram_message')) {
+                    sap_send_telegram_message($complete_message);
+                } else {
+                    // Fallback to our notification method
+                    self::send_telegram_notification("עדכון מלאי מ-SAP", $complete_message);
                 }
-                if (preg_match('/נכשלו: (\d+)/', $clean_output, $matches)) {
-                    $failed = $matches[1] ?? 0;
-                    $message .= "\nנכשלו: {$failed}";
+                
+            } else {
+                // Fallback to old parsing method if structured data not available
+                $success = !empty($result) && strpos($result, 'שגיאה') === false;
+                $status_text = $success ? "הושלם בהצלחה" : "הושלם עם שגיאות";
+                $title = "עדכון מלאי מ-SAP {$status_text}";
+                
+                $message = "\n\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
+                $message .= "\nזמן: " . current_time('Y-m-d H:i:s');
+                
+                if (!empty($item_code_filter)) {
+                    $message .= "\nמסנן: {$item_code_filter}";
                 }
-                if (preg_match('/שגיאות: (\d+)/', $clean_output, $matches)) {
-                    $errors = $matches[1] ?? 0;
-                    $message .= "\nשגיאות: {$errors}";
-                }
+                
+                self::send_telegram_notification($title, $message);
             }
-            
-            if (!empty($item_code_filter)) {
-                $message .= "\n\nמסנן: {$item_code_filter}";
-            }
-            
-            $message .= "\n\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
-            $message .= "\nזמן: " . current_time('Y-m-d H:i:s');
-            
-            self::send_telegram_notification($title, $message);
             
             error_log('SAP Background Processor: Stock update job completed successfully');
             
