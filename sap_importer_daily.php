@@ -133,9 +133,8 @@ function my_sap_importer_settings_page() {
         <form method="post" action="">
             <?php wp_nonce_field('run_sap_variation_import', 'sap_variation_import_nonce'); ?>
             <p>
-                לחץ על הכפתור למטה כדי להפעיל יבוא ועדכון וריאציות מוצרים מ-SAP.
-                <br>
-                **שימו לב**: פעולה זו עלולה לקחת זמן רב עבור כמויות גדולות של פריטים.
+                לחץ על הכפתור למטה כדי להפעיל יבוא ועדכון וריאציות מוצרים מ-SAP.<br>
+                <strong>📱 חדש:</strong> המשימה תרוץ ברקע ותקבל הודעת טלגרם כשתסתיים!
             </p>
             <label for="item_code_filter">קוד פריט ספציפי (אופציונלי):</label>
             <input type="text" id="item_code_filter" name="item_code_filter" placeholder="לדוגמה: 60010">
@@ -145,14 +144,57 @@ function my_sap_importer_settings_page() {
         </form>
 
         <?php
-        // טיפול בהפעלת יבוא וריאציות
+        // טיפול בהפעלת יבוא וריאציות - רקע
         if (isset($_POST['run_variation_import']) && current_user_can('manage_options') && check_admin_referer('run_sap_variation_import', 'sap_variation_import_nonce')) {
-            echo '<div class="updated notice is-dismissible"><p>מתחיל יבוא וריאציות... אנא המתן. פרטים מלאים יוצגו מטה.</p></div>';
-            $item_code_to_import = sanitize_text_field($_POST['item_code_filter']);
-            if (!empty($item_code_to_import)) {
-                echo sap_update_variations_from_api($item_code_to_import);
+            // Check if background processing is available
+            if (class_exists('SAP_Background_Processor') && SAP_Background_Processor::is_action_scheduler_available()) {
+                $item_code_filter = sanitize_text_field($_POST['item_code_filter']);
+                $item_code_filter = !empty($item_code_filter) ? $item_code_filter : null;
+                
+                // Queue background job
+                $job_id = SAP_Background_Processor::queue_stock_update($item_code_filter);
+                
+                if ($job_id) {
+                    // Wait a moment and check if job actually executed
+                    sleep(2);
+                    
+                    // Try to force execution if it didn't run
+                    $executed = false;
+                    for ($i = 0; $i < 3; $i++) {
+                        $result = SAP_Background_Processor::force_process_queue();
+                        if ($result) {
+                            $executed = true;
+                            break;
+                        }
+                        sleep(1);
+                    }
+                    
+                    if (!$executed) {
+                        // Fallback to synchronous if background failed
+                        echo '<div class="notice notice-warning"><p>⚠️ Background processing failed, executing synchronously...</p></div>';
+                        echo SAP_Background_Processor::execute_synchronous_fallback('stock_update', ['item_code_filter' => $item_code_filter]);
+                    } else {
+                        // Success - redirect to show success message
+                        $redirect_url = add_query_arg([
+                            'sap_job_queued' => 'stock_update',
+                            'job_id' => $job_id
+                        ], $_SERVER['REQUEST_URI']);
+                        wp_redirect($redirect_url);
+                        exit;
+                    }
+                } else {
+                    echo '<div class="notice notice-error"><p>❌ שגיאה: לא ניתן לתזמן את המשימה. מעבר לביצוע סנכרוני...</p></div>';
+                    echo SAP_Background_Processor::execute_synchronous_fallback('stock_update', ['item_code_filter' => $item_code_filter]);
+                }
             } else {
-                echo sap_run_daily_import_task(); // מפעיל את הטווח הקבוע של הייבוא הלילי
+                // Fallback to synchronous processing
+                echo '<div class="notice notice-warning"><p>⚠️ מעבד הרקע אינו זמין. מריץ סנכרון רגיל (עלול לחסום את האתר)...</p></div>';
+                $item_code_to_import = sanitize_text_field($_POST['item_code_filter']);
+                if (!empty($item_code_to_import)) {
+                    echo sap_update_variations_from_api($item_code_to_import);
+                } else {
+                    echo sap_run_daily_import_task(); // מפעיל את הטווח הקבוע של הייבוא הלילי
+                }
             }
         }
         ?>

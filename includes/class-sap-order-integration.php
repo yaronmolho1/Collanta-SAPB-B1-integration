@@ -482,43 +482,43 @@ function sap_handle_order_integration($order_id) {
         return;
     }
 
-    // CRITICAL FIX: Validate payment completion for Yaad payments
+    // CRITICAL FIX: MANDATORY Yaad payment validation - NO order can be sent to SAP without valid Yaad payment token
     $payment_method = $order->get_payment_method();
-    if ($payment_method === 'yaadpay') {
-        $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+    $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+    
+    // Block if no Yaad payment data exists at all
+    if (empty($yaad_payment_data)) {
+        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed). Payment method: ' . $payment_method);
         
-        if (empty($yaad_payment_data)) {
-            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed)');
-            
-            if (class_exists('SAP_Sync_Logger')) {
-                SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed");
-            }
-            
-            $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data)');
-            return;
+        if (class_exists('SAP_Sync_Logger')) {
+            SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed. No order can be sent to SAP without Yaad payment token.");
         }
         
-        // Parse Yaad payment data to check CCode (0 = success)
-        parse_str($yaad_payment_data, $yaad_parsed);
-        $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
-        $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
-        
-        if ($ccode !== '0' || empty($acode)) {
-            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed (CCode: ' . $ccode . ', ACode: ' . $acode . ')');
-            
-            if (class_exists('SAP_Sync_Logger')) {
-                SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed - CCode: {$ccode}, ACode: {$acode}");
-            }
-            
-            $order->add_order_note('SAP Integration blocked: Payment failed (CCode: ' . $ccode . ')');
-            return;
-        }
+        $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data). Orders can only be sent to SAP after successful Yaad payment processing.');
+        return;
     }
+    
+    // Parse Yaad payment data to check CCode (0 = success) and ACode (approval code)
+    parse_str($yaad_payment_data, $yaad_parsed);
+    $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
+    $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
+    
+    // Block if payment was not successful
+    if ($ccode !== '0' || empty($acode)) {
+        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'empty') . ')');
+        
+        if (class_exists('SAP_Sync_Logger')) {
+            SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed or incomplete - CCode: {$ccode}, ACode: " . ($acode ?: 'empty') . ". CCode must be '0' and ACode must exist.");
+        }
+        
+        $order->add_order_note('SAP Integration blocked: Payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'missing') . '). Orders can only be sent to SAP after successful payment.');
+        return;
+    }
+    
+    // Log successful validation
+    error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
 
-    error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed');
-
-    // Check if order should be synced (prevents duplicates and manages retries)
-    // RETRYING COMMENTED OUT - Check only for success/in_progress, skip retry logic
+    // Check if order should be synced (prevents duplicates) - NO RETRIES
     if (class_exists('SAP_Sync_Logger')) {
         global $wpdb;
         $table_name = $wpdb->prefix . 'sap_order_sync_log';
@@ -533,12 +533,6 @@ function sap_handle_order_integration($order_id) {
             return;
         }
     }
-    
-    // Original retry logic commented out:
-    // if (!class_exists('SAP_Sync_Logger') || !SAP_Sync_Logger::should_sync_order($order_id)) {
-    //     error_log('SAP Integration: Order ' . $order_id . ' should not be synced at this time. Skipping.');
-    //     return;
-    // }
 
     // Log sync start
     if (class_exists('SAP_Sync_Logger')) {
@@ -572,28 +566,15 @@ function sap_handle_order_integration($order_id) {
 
     $customer_vat_id = $order->get_meta('_billing_vat_id'); // Assuming there's a custom field for VAT ID
 
-    // Get GroupCode from fineline source code (קוד מוסד, אופציונלי)
-    $fineline_source_code = $order->get_meta('_fineline_source_code');
-    if (!empty($fineline_source_code)) {
-        $code_int = (int) $fineline_source_code;
-        if ($code_int >= 102 && $code_int <= 150) {
-            $group_code = $code_int;
-        } else {
-            $group_code = 123;
-        }
-    } else {
-        $group_code = 123;
-    }
-
     // Get customer note for address comments
     $customer_note = $order->get_customer_note();
 
     // Billing address details
     $billing_address_1 = $order->get_billing_address_1();
+    $billing_address_2 = $order->get_billing_address_2(); // House number - built-in WordPress field
     $billing_city = $order->get_billing_city();
     $billing_postcode = $order->get_billing_postcode();
     $billing_country = $order->get_billing_country();
-    $billing_street_no = $order->get_meta('_billing_street_number') ?: ''; // If there's a separate field for street number
     
 
     // Shipping address details for SAP U_ fields
@@ -647,7 +628,6 @@ function sap_handle_order_integration($order_id) {
         "CardName"        => $customer_full_name,
         "Series"          => 71, // SAP B1 will auto-assign next CardCode based on this Series
         "CardType"        => "cCustomer",
-        "GroupCode"       => $group_code, // Use GroupCode from fineline source code
         "Phone1"          => $customer_phone,
         "PriceListNum"    => 1, // Ensure this is correct PriceListNum
         "SalesPersonCode" => 2, // Sales person code
@@ -662,7 +642,7 @@ function sap_handle_order_integration($order_id) {
                 "City"        => $billing_city,
                 "Country"     => "IL", 
                 "AddressType" => "bo_ShipTo",
-                "StreetNo"    => $billing_street_no,
+                "StreetNo"     => $billing_address_2,
             ],
         ],
         "ContactEmployees" => [ // Add contact persons block as specified
@@ -885,13 +865,12 @@ function sap_handle_order_integration($order_id) {
                 "CardCode"        => $sap_customer_code,
                 "DocTotal"        => $order_total,
                 "ImportFileNum"   => (string) $order->get_order_number(),
-                "Comments"        => "WooCommerce Order #" . $order->get_order_number() . " from " . $customer_email . ($customer_note ? " - " . $customer_note : ""),
-                "JournalMemo"     => "Sales Orders - " . $sap_customer_code,
+                "Comments"        => $customer_note,
+                "JournalMemo"     => "WooCommerce Order #" . $order->get_order_number() . " from " . $customer_email,
                 "SalesPersonCode" => 2,
                 "Series"          => 77, // Order series
                 "DocumentsOwner"  => 1,
                 "DocumentLines"   => $order_lines_for_sap,
-"Comments"        => $customer_note,
             ],
             "Invoice" => [
                 "DocumentLines" => $invoice_lines_for_sap, // BaseEntry will be filled after order creation
@@ -1027,25 +1006,9 @@ function sap_handle_admin_order_save($order_id, $post = null) {
     }
 
     $order = wc_get_order($order_id);
-    // RETRYING COMMENTED OUT - Check only for success/in_progress, skip retry logic
-    if ($order && class_exists('SAP_Sync_Logger')) {
-        global $wpdb;
-        $table_name = $wpdb->prefix . 'sap_order_sync_log';
-        $sync_record = $wpdb->get_row($wpdb->prepare(
-            "SELECT sync_status FROM $table_name WHERE order_id = %d",
-            $order_id
-        ));
-        
-        // Only process if not already successful or in progress (no retry logic)
-        if (!$sync_record || !in_array($sync_record->sync_status, ['success', 'in_progress'])) {
-            sap_handle_order_integration_background($order_id);
-        }
+    if ($order && class_exists('SAP_Sync_Logger') && SAP_Sync_Logger::should_sync_order($order_id)) {
+        sap_handle_order_integration_background($order_id);
     }
-    
-    // Original retry logic commented out:
-    // if ($order && class_exists('SAP_Sync_Logger') && SAP_Sync_Logger::should_sync_order($order_id)) {
-    //     sap_handle_order_integration_background($order_id);
-    // }
 }
 
 // Traditional hook for legacy order storage
