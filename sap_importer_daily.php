@@ -26,8 +26,8 @@ function my_sap_importer_load_files() {
         // טען את אינטגרציית ההזמנו
         require_once plugin_dir_path( __FILE__ ) . 'includes/class-sap-order-integration.php';
         
-        // טען את הקוד החדש של יבוא מוצרים ידני
-        require_once plugin_dir_path( __FILE__ ) . 'includes/sap-manual-product-import.php';
+        // טען את הקוד החדש של יצירת מוצרים מ-SAP
+        require_once plugin_dir_path( __FILE__ ) . 'includes/sap-product-create.php';
         
         // טען את מעבד הרקע של SAP
         require_once plugin_dir_path( __FILE__ ) . 'includes/class-sap-background-processor.php';
@@ -202,9 +202,9 @@ function my_sap_importer_settings_page() {
         <form method="post" action="">
             <?php wp_nonce_field('run_sap_manual_product_import', 'sap_manual_product_import_nonce'); ?>
             <p>
-                לחץ על הכפתור למטה כדי להפעיל יבוא מוצרים חדשים מ-SAP.<br>
-                פעולה זו תיצור מוצרים חדשים בלבד (מקובצים לפי ItmsGrpNam) ולא תעדכן מוצרים קיימים.<br>
-                <strong>📱 חדש:</strong> המשימה תרוץ ברקע ותקבל הודעת טלגרם כשתסתיים!
+                לחץ על הכפתור למטה כדי להפעיל יצירת מוצרים חדשים מ-SAP.<br>
+                פעולה זו תיצור מוצרים חדשים בלבד (מקובצים לפי SWW) שעדיין לא קיימים ב-WooCommerce.<br>
+                <strong>📱 הודעות:</strong> תקבל הודעת טלגרם עם סיכום התוצאות!
             </p>
             <p>
                 <input type="submit" name="run_manual_product_import" class="button button-primary" value="הפעל יבוא מוצרים חדשים">
@@ -215,9 +215,9 @@ function my_sap_importer_settings_page() {
         // טיפול בהפעלת יבוא מוצרים ידני - DISABLED ACTION SCHEDULER FOR TESTING
         if (isset($_POST['run_manual_product_import']) && current_user_can('manage_options') && check_admin_referer('run_sap_manual_product_import', 'sap_manual_product_import_nonce')) {
             
-            // TEMPORARY: Force synchronous execution for debugging count() error
-            echo '<div class="notice notice-warning"><p>⚠️ <strong>TESTING MODE:</strong> Action Scheduler disabled - running synchronously to debug count() error. Limited to 20 items.</p></div>';
-            echo sap_manual_product_import();
+            // Execute new product creation function directly
+            echo '<div class="notice notice-info"><p>📦 <strong>מפעיל יצירת מוצרים חדשים מ-SAP</strong> - רק פריטים שלא קיימים ב-WooCommerce יתווספו.</p></div>';
+            echo sap_create_products_from_api();
             
             /* COMMENTED OUT - Action Scheduler code causing count() error
             // Check if background processing is available

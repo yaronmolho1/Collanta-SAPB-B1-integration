@@ -170,8 +170,8 @@ class SAP_Background_Processor {
         try {
             switch ($job_type) {
                 case 'product_import':
-                    if (function_exists('sap_manual_product_import')) {
-                        return sap_manual_product_import();
+                    if (function_exists('sap_create_products_from_api')) {
+                        return sap_create_products_from_api();
                     }
                     break;
                     
@@ -389,13 +389,13 @@ class SAP_Background_Processor {
             self::ensure_functions_loaded();
             
             // Ensure required functions are available
-            if (!function_exists('sap_manual_product_import')) {
-                throw new Exception('Product import function not available after loading files');
+            if (!function_exists('sap_create_products_from_api')) {
+                throw new Exception('Product creation function not available after loading files');
             }
             
             // Start output buffering to capture the result
             ob_start();
-            $result = sap_manual_product_import();
+            $result = sap_create_products_from_api();
             $output = ob_get_clean();
             
             // Extract job completion info
@@ -403,7 +403,7 @@ class SAP_Background_Processor {
             
             // Send completion notification
             $status = $success ? "✅ SUCCESS" : "❌ FAILED";
-            $message = "Product Import Completed\n\n";
+            $message = "Product Creation Completed\n\n";
             $message .= "Status: {$status}\n";
             $message .= "User: " . get_user_by('id', $args['user_id'])->display_name . "\n";
             $message .= "Time: " . current_time('Y-m-d H:i:s') . "\n";
@@ -419,7 +419,7 @@ class SAP_Background_Processor {
                 $message .= "\nSummary: {$summary}...";
             }
             
-            self::send_telegram_notification("Product Import Complete", $message);
+            self::send_telegram_notification("Product Creation Complete", $message);
             
             error_log('SAP Background Processor: Product import job completed successfully');
             
@@ -429,7 +429,7 @@ class SAP_Background_Processor {
             
             // Send error notification
             self::send_telegram_notification(
-                "❌ Product Import Failed",
+                "❌ Product Creation Failed",
                 "Error: {$error_msg}\nUser: " . get_user_by('id', $args['user_id'])->display_name . "\nTime: " . current_time('Y-m-d H:i:s')
             );
         }
@@ -755,7 +755,7 @@ class SAP_Background_Processor {
         
         // Required files for background processing
         $required_files = [
-            $plugin_dir . '/includes/sap-manual-product-import.php',
+            $plugin_dir . '/includes/sap-product-create.php',
             $plugin_dir . '/includes/sap-source-codes-sync.php',
             $plugin_dir . '/includes/class-sap-order-integration.php',
             $plugin_dir . '/includes/sap-products-import.php'
