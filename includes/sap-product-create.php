@@ -971,42 +971,40 @@ function sap_create_variation_attributes($items) {
     error_log("SAP Creator: Unique sizes found: " . implode(', ', $size_values));
     error_log("SAP Creator: Unique colors found: " . implode(', ', $color_values));
     
-    // Size attribute (ID 4)
+    // Size attribute (ID 4) - EXACTLY like creation_old.php
     if (!empty($size_values)) {
-        // CALL MODIFIED FUNCTION TO GET SLUGS
-        $size_slugs = sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
-        
         $size_attribute = new WC_Product_Attribute();
         $size_attribute->set_id(4); // Attribute ID 4
         $size_attribute->set_name('pa_size');
-        // CRITICAL FIX: Use slugs for options instead of raw values
-        $size_attribute->set_options($size_slugs);
+        // CRITICAL: Use RAW VALUES for parent attributes (like creation_old.php)
+        $size_attribute->set_options($size_values);
         $size_attribute->set_position(0);
-        $size_attribute->set_visible(true); // MUST be visible for variations to show on frontend
+        $size_attribute->set_visible(false); // FALSE like creation_old.php
         $size_attribute->set_variation(true);
         
         $attributes_array['pa_size'] = $size_attribute;
         
-        error_log("SAP Creator: Created size attribute with slugs: " . implode(', ', $size_slugs) . " (from values: " . implode(', ', $size_values) . ")");
+        // Ensure size taxonomy exists and terms are created
+        sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
+        error_log("SAP Creator: Created size attribute with raw values: " . implode(', ', $size_values));
     }
     
-    // Color attribute (ID 3)
+    // Color attribute (ID 3) - EXACTLY like creation_old.php
     if (!empty($color_values)) {
-        // CALL MODIFIED FUNCTION TO GET SLUGS
-        $color_slugs = sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
-        
         $color_attribute = new WC_Product_Attribute();
         $color_attribute->set_id(3); // Attribute ID 3
         $color_attribute->set_name('pa_color');
-        // CRITICAL FIX: Use slugs for options instead of raw values
-        $color_attribute->set_options($color_slugs);
+        // CRITICAL: Use RAW VALUES for parent attributes (like creation_old.php)
+        $color_attribute->set_options($color_values);
         $color_attribute->set_position(1);
-        $color_attribute->set_visible(true); // MUST be visible for variations to show on frontend
+        $color_attribute->set_visible(false); // FALSE like creation_old.php
         $color_attribute->set_variation(true);
         
         $attributes_array['pa_color'] = $color_attribute;
         
-        error_log("SAP Creator: Created color attribute with slugs: " . implode(', ', $color_slugs) . " (from values: " . implode(', ', $color_values) . ")");
+        // Ensure color taxonomy exists and terms are created
+        sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
+        error_log("SAP Creator: Created color attribute with raw values: " . implode(', ', $color_values));
     }
     
     error_log("SAP Creator: Returning " . count($attributes_array) . " parent attributes: " . implode(', ', array_keys($attributes_array)));
@@ -1231,12 +1229,11 @@ function sap_ensure_term_exists($taxonomy, $term_name, $term_slug) {
 
 /**
  * Ensure attribute taxonomy exists and create terms
- * MODIFIED TO RETURN SLUGS for parent attribute compatibility
+ * Based on creation_old.php logic - DOES NOT RETURN SLUGS
  *
  * @param string $taxonomy Taxonomy slug (e.g., 'pa_size')
  * @param string $label Attribute label (e.g., 'Size')
  * @param array $terms Array of term names
- * @return array Array of sanitized term slugs
  */
 function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
     // Ensure taxonomy exists
@@ -1252,11 +1249,9 @@ function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
         
         if (is_wp_error($created_attr_id)) {
             error_log("SAP Creator: Failed to create attribute {$label}: " . $created_attr_id->get_error_message());
-            return [];
+            return;
         }
     }
-    
-    $term_slugs = []; // Initialize array to store slugs
     
     // Create terms if they don't exist
     foreach ($terms as $term_name) {
@@ -1269,18 +1264,15 @@ function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
             $inserted_term = wp_insert_term($term_name, $taxonomy);
             if (is_wp_error($inserted_term)) {
                 error_log("SAP Creator: Failed to insert term {$term_name} for attribute {$taxonomy}: " . $inserted_term->get_error_message());
-                continue;
             }
         }
-        $term_slugs[] = $term_slug; // Collect the slug
     }
-    
-    return $term_slugs; // Return the collected slugs
 }
 
 /**
  * SAP API PATCH request
  * Used for updating SAP items with WooCommerce IDs
+ * Uses same pattern as working POST functions
  *
  * @param string $endpoint API endpoint
  * @param array $data Request data
@@ -1288,24 +1280,34 @@ function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
  * @return array|WP_Error Response data or error
  */
 function sap_api_patch($endpoint, $data = [], $token = null) {
-    $url = trailingslashit(SAP_API_BASE) . ltrim($endpoint, '/');
-    $headers = [
-        'Content-Type' => 'application/json',
-        'Accept' => 'application/json',
-    ];
-
-    if ($token) {
-        $headers['Authorization'] = 'Bearer ' . $token;
+    // If no token provided, try to get one (like POST functions)
+    if (is_null($token)) {
+        $token = sap_get_auth_token();
+        if (is_wp_error($token)) {
+            return $token; // Return authentication error
+        }
     }
+    
+    $url = SAP_API_BASE . '/' . $endpoint; // Use same URL pattern as POST
+    
+    $headers = [
+        'Content-Type'  => 'application/json',
+        'Accept'        => '*/*', // Use same Accept header as POST
+        'Authorization' => 'Bearer ' . $token,
+    ];
 
     $args = [
         'method'      => 'PATCH',
         'headers'     => $headers,
-        'body'        => wp_json_encode($data),
-        'timeout'     => 30,
+        'body'        => json_encode($data), // Use json_encode like POST functions
+        'timeout'     => 180, // Use same timeout as POST functions
         'data_format' => 'body',
-        'sslverify'   => false,
+        'sslverify'   => defined('WP_DEBUG') && WP_DEBUG ? false : true, // Same SSL setting as POST
     ];
+
+    error_log('SAP API Patch Request URL: ' . $url);
+    error_log('SAP API Patch Request Headers: ' . json_encode($headers, JSON_PRETTY_PRINT));
+    error_log('SAP API Patch Request Body: ' . json_encode($data, JSON_PRETTY_PRINT));
 
     $response = wp_remote_request($url, $args);
 
@@ -1317,17 +1319,97 @@ function sap_api_patch($endpoint, $data = [], $token = null) {
     $body = wp_remote_retrieve_body($response);
     $http_code = wp_remote_retrieve_response_code($response);
     
+    error_log('SAP API Patch Response (HTTP ' . $http_code . '): ' . substr($body, 0, 500));
+    
     if ($http_code !== 200 && $http_code !== 204) {
         error_log("SAP API HTTP Error {$http_code} for {$endpoint}: " . substr($body, 0, 500));
-        return new WP_Error('sap_api_http_error', "HTTP {$http_code} for {$endpoint}");
+        return new WP_Error('sap_api_http_error', "HTTP {$http_code} for {$endpoint}: " . substr($body, 0, 200));
     }
 
-    // Parse response if there's a body (200), or return true for no content (204)
-    if (empty($body)) {
+    // Parse response if there's a body (200), or return success for no content (204)
+    if (empty($body) || $http_code === 204) {
         return ['success' => true];
     }
     
     return sap_parse_api_response($body, $endpoint);
+}
+
+/**
+ * Parse API response from SAP
+ * Same function as in sap-products-import.php
+ *
+ * @param string $body Response body
+ * @param string $endpoint Endpoint for logging
+ * @return array|WP_Error Parsed response or error
+ */
+if (!function_exists('sap_parse_api_response')) {
+function sap_parse_api_response($body, $endpoint) {
+    if (empty($body) || trim($body) === '') {
+        return [];
+    }
+    
+    $body = sap_clean_json_response($body);
+    $decoded_body = json_decode($body, true, 512, JSON_INVALID_UTF8_IGNORE | JSON_BIGINT_AS_STRING);
+    
+    if ($decoded_body === null) {
+        error_log("SAP API JSON decode error for {$endpoint}: " . json_last_error_msg());
+        return new WP_Error('json_decode_error', 'Failed to decode JSON for ' . $endpoint);
+    }
+    
+    return $decoded_body;
+}
+}
+
+/**
+ * Clean SAP JSON response by removing control characters
+ * Same function as in sap-products-import.php
+ */
+if (!function_exists('sap_clean_json_response')) {
+function sap_clean_json_response($response) {
+    // Remove UTF-8 BOM if present
+    if (substr($response, 0, 3) === "\xEF\xBB\xBF") {
+        $response = substr($response, 3);
+    }
+    
+    // Remove ALL control characters
+    $response = preg_replace('/[\x00-\x1F\x7F]/', '', $response);
+    
+    return trim($response);
+}
+}
+
+/**
+ * Fallback function to update SAP using POST method
+ * Used when PATCH method is not supported (HTTP 405)
+ *
+ * @param string $item_code SAP ItemCode
+ * @param int $site_group_id WooCommerce parent/product ID
+ * @param int $site_item_id WooCommerce variation/product ID
+ * @param string $token SAP auth token
+ * @return bool True on success, false on failure
+ */
+function sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id, $token) {
+    error_log("SAP Creator: Using POST fallback for {$item_code}");
+    
+    // Use batch endpoint with POST method
+    $endpoint = 'items';
+    $batch_data = [
+        [
+            'itemCode' => $item_code,
+            'U_SiteGroupID' => (string)$site_group_id,
+            'U_SiteItemID' => (string)$site_item_id
+        ]
+    ];
+    
+    $response = sap_api_post($endpoint, $batch_data, $token);
+    
+    if (is_wp_error($response)) {
+        error_log("SAP Creator: Fallback POST also failed for {$item_code}: " . $response->get_error_message());
+        return false;
+    }
+    
+    error_log("SAP Creator: Fallback POST succeeded for {$item_code}");
+    return true;
 }
 
 /**
@@ -1356,17 +1438,13 @@ function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) 
         'U_SiteItemID' => (string)$site_item_id
     ];
     
-    // Use POST method instead of PATCH for better compatibility
-    $endpoint = 'items'; // Use batch endpoint
-    $batch_data = [
-        [
-            'itemCode' => $item_code,
-            'U_SiteGroupID' => (string)$site_group_id,
-            'U_SiteItemID' => (string)$site_item_id
-        ]
-    ];
+    // Use proper PATCH endpoint for individual item updates
+    $endpoint = 'Items/' . urlencode($item_code);
     
-    $response = sap_api_post($endpoint, $batch_data, $token);
+    error_log("SAP Creator: Attempting PATCH update for {$item_code} to endpoint: {$endpoint}");
+    error_log("SAP Creator: Update data: " . json_encode($update_data));
+    
+    $response = sap_api_patch($endpoint, $update_data, $token);
     
     if (is_wp_error($response)) {
         $error_message = $response->get_error_message();
@@ -1380,6 +1458,13 @@ function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) 
                 "HTTP 403 Error",
                 "Failed to update SAP item {$item_code} - Permission denied. Check API credentials and permissions."
             );
+        } elseif (strpos($error_message, '404') !== false) {
+            error_log("SAP Creator: HTTP 404 (Not Found) for {$item_code} - Item may not exist in SAP");
+        } elseif (strpos($error_message, '405') !== false) {
+            error_log("SAP Creator: HTTP 405 (Method Not Allowed) for {$item_code} - PATCH may not be supported, trying fallback");
+            
+            // Fallback to POST method if PATCH is not supported
+            return sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id, $token);
         } else {
             error_log("SAP Creator: Failed to update SAP for {$item_code}: {$error_message}");
         }
@@ -1387,7 +1472,7 @@ function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) 
         return false;
     }
     
-    error_log("SAP Creator: Updated SAP for {$item_code} - GroupID: {$site_group_id}, ItemID: {$site_item_id}");
+    error_log("SAP Creator: Successfully updated SAP for {$item_code} - GroupID: {$site_group_id}, ItemID: {$site_item_id}");
     return true;
 }
 

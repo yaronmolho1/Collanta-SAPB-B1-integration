@@ -320,6 +320,48 @@ function sap_get_auth_token() {
 }
 
 /**
+ * Get price from SAP item data (PriceList 1 × 1.18, rounded to x.9)
+ * Copied from sap-product-create.php for consistency
+ */
+if (!function_exists('sap_get_price_from_item')) {
+function sap_get_price_from_item($item, $item_code = '') {
+    if (!isset($item['ItemPrices']) || !is_array($item['ItemPrices'])) {
+        return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
+    }
+    
+    // First priority: Look for PriceList 1
+    foreach ($item['ItemPrices'] as $price_entry) {
+        if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1 && 
+            isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
+            $base_price = (float)$price_entry['Price'];
+            $calculated_price = floor($base_price * 5.18) . '.9';
+            return [
+                'price' => $calculated_price,
+                'used_fallback' => false,
+                'pricelist_used' => 1
+            ];
+        }
+    }
+    
+    // Fallback: Look for any other valid price list
+    foreach ($item['ItemPrices'] as $price_entry) {
+        if (isset($price_entry['PriceList']) && is_numeric($price_entry['PriceList']) &&
+            isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
+            $base_price = (float)$price_entry['Price'];
+            $calculated_price = floor($base_price * 5.18) . '.9';
+            return [
+                'price' => $calculated_price,
+                'used_fallback' => true,
+                'pricelist_used' => (int)$price_entry['PriceList']
+            ];
+        }
+    }
+    
+    return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
+}
+}
+
+/**
  * Send message to Telegram
  */
 function sap_send_telegram_message($message) {
@@ -361,8 +403,8 @@ function sap_send_telegram_message($message) {
 }
 
 /**
- * Main function to update stock from SAP API - SIMPLIFIED VERSION
- * Only updates stock quantities based on SKU matching
+ * Main function to update stock and prices from SAP API
+ * Updates stock quantities and prices (PriceList 1 × 1.18 rounded to x.9) based on SKU matching
  *
  * @param string|null $item_code_filter Optional single item code to update
  * @return string HTML output of the update status
@@ -376,10 +418,10 @@ if (!function_exists('sap_update_variations_from_api')) {
 
     ob_start();
 
-    echo "<h2>מתחיל עדכון מלאי מ-SAP...</h2>";
+    echo "<h2>מתחיל עדכון מלאי ומחירים מ-SAP...</h2>";
     
     // Send start notification
-    $start_message = "עדכון מלאי מ-SAP החל\n";
+    $start_message = "עדכון מלאי ומחירים מ-SAP החל\n";
     if (!empty($item_code_filter)) {
         $start_message .= "פריט בודד: " . $item_code_filter . "\n";
     } else {
@@ -401,14 +443,15 @@ if (!function_exists('sap_update_variations_from_api')) {
 
     echo "<p style='color: green;'>✅ התחברות ל-SAP API בוצעה בהצלחה.</p>";
 
-    // 2. Request only necessary fields for stock update
+    // 2. Request necessary fields for stock and price update
     $itemsRequest = [
         "selectObjects" => [
             ["field" => "ItemCode"],
             ["field" => "ItemName"],
             ["field" => "U_SiteItemID"],
             ["field" => "U_SiteGroupID"],
-            ["field" => "ItemWarehouseInfoCollection"]
+            ["field" => "ItemWarehouseInfoCollection"],
+            ["field" => "ItemPrices"]
         ],
         "filterObjects" => [
             [
@@ -495,13 +538,15 @@ if (!function_exists('sap_update_variations_from_api')) {
         return ob_get_clean();
     }
 
-    // 5. Update stock for each item
-    echo "<h3>מעדכן מלאי:</h3>";
+    // 5. Update stock and price for each item
+    echo "<h3>מעדכן מלאי ומחירים:</h3>";
     echo "<ul style='list-style-type: disc; margin-left: 20px;'>";
 
     $stats = [
         'processed' => 0,
-        'updated' => 0,
+        'stock_updated' => 0,
+        'price_updated' => 0,
+        'both_updated' => 0,
         'not_found' => 0,
         'errors' => 0
     ];
@@ -575,24 +620,65 @@ if (!function_exists('sap_update_variations_from_api')) {
             continue;
         }
         
+        // Update stock and price
+        $stock_updated = false;
+        $price_updated = false;
+        $update_messages = [];
+        
         // Update stock - always update even if 0 or negative
         if (is_numeric($sap_stock)) {
             // Always keep manage_stock enabled - don't touch this setting
             $product->set_stock_quantity($adjusted_stock);
             $product->set_stock_status($adjusted_stock > 0 ? 'instock' : 'outofstock');
+            $stock_updated = true;
+            $update_messages[] = "מלאי: {$adjusted_stock} (SAP: {$sap_stock}, -10)";
+        }
+        
+        // Update price using PriceList 1 × 1.18 rounded to x.9
+        $price_result = sap_get_price_from_item($item, $sap_item_code);
+        if ($price_result['price'] !== null) {
+            $current_price = $product->get_regular_price();
+            $new_price = $price_result['price'];
+            
+            // Only update if price changed
+            if ($current_price != $new_price) {
+                $product->set_regular_price($new_price);
+                $product->set_price($new_price);
+                $price_updated = true;
+                $pricelist_info = $price_result['used_fallback'] ? " (PL{$price_result['pricelist_used']})" : "";
+                $update_messages[] = "מחיר: {$current_price} → {$new_price}{$pricelist_info}";
+            }
+        }
+        
+        // Save product if any updates were made
+        if ($stock_updated || $price_updated) {
             $product->save();
             
-            $stats['updated']++;
-            echo "<li>{$sap_item_code} - {$sap_item_name}: מלאי עודכן ל-{$adjusted_stock} (SAP: {$sap_stock}, -10) [{$match_method}]</li>";
+            // Update statistics
+            if ($stock_updated && $price_updated) {
+                $stats['both_updated']++;
+            } elseif ($stock_updated) {
+                $stats['stock_updated']++;
+            } elseif ($price_updated) {
+                $stats['price_updated']++;
+            }
+            
+            $message = implode(', ', $update_messages);
+            echo "<li>{$sap_item_code} - {$sap_item_name}: {$message} [{$match_method}]</li>";
         } else {
-            // Only error if stock is not numeric at all
-            $stats['errors']++;
-            $failed_items[] = [
-                'item_code' => $sap_item_code,
-                'item_name' => $sap_item_name,
-                'site_item_id' => $sap_site_item_id,
-                'reason' => 'מלאי לא תקין ב-SAP (לא מספרי)'
-            ];
+            // No updates made
+            if (!is_numeric($sap_stock)) {
+                $stats['errors']++;
+                $failed_items[] = [
+                    'item_code' => $sap_item_code,
+                    'item_name' => $sap_item_name,
+                    'site_item_id' => $sap_site_item_id,
+                    'reason' => 'מלאי לא תקין ב-SAP (לא מספרי)'
+                ];
+            } else {
+                // Stock was valid but no price update needed
+                echo "<li>{$sap_item_code} - {$sap_item_name}: ללא שינויים נדרשים [{$match_method}]</li>";
+            }
         }
     }
 
@@ -608,13 +694,15 @@ if (!function_exists('sap_update_variations_from_api')) {
         echo "</ul>";
     }
     
-    echo "<p style='color: green;'>תהליך עדכון מלאי הסתיים.</p>";
+    echo "<p style='color: green;'>תהליך עדכון מלאי ומחירים הסתיים.</p>";
     
     // Summary
     echo "<h3>סיכום:</h3>";
     echo "<ul>";
     echo "<li>פריטים שעובדו: {$stats['processed']}</li>";
-    echo "<li>מלאי עודכן: {$stats['updated']}</li>";
+    echo "<li>מלאי בלבד עודכן: {$stats['stock_updated']}</li>";
+    echo "<li>מחיר בלבד עודכן: {$stats['price_updated']}</li>";
+    echo "<li>מלאי ומחיר עודכנו: {$stats['both_updated']}</li>";
     echo "<li>לא נמצאו: {$stats['not_found']}</li>";
     echo "<li>שגיאות: {$stats['errors']}</li>";
     echo "</ul>";
@@ -622,15 +710,19 @@ if (!function_exists('sap_update_variations_from_api')) {
     // Send completion notification in Hebrew
     if (empty($failed_items)) {
         // Success - all items updated
-        $complete_message = "עדכון מלאי מ-SAP הושלם בהצלחה\n\n";
+        $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
         $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-        $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+        $complete_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+        $complete_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+        $complete_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
         $complete_message .= "זמן: " . current_time('Y-m-d H:i:s');
     } else {
         // Partial failure - list failed items
-        $complete_message = "עדכון מלאי מ-SAP הושלם עם שגיאות\n\n";
+        $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
         $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-        $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+        $complete_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+        $complete_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+        $complete_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
         $complete_message .= "נכשלו: {$stats['not_found']}\n";
         $complete_message .= "שגיאות: {$stats['errors']}\n\n";
         
@@ -647,14 +739,18 @@ if (!function_exists('sap_update_variations_from_api')) {
         // Send summary first
         $summary_message = "";
         if (empty($failed_items)) {
-            $summary_message = "עדכון מלאי מ-SAP הושלם בהצלחה\n\n";
+            $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
             $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
-            $summary_message .= "מלאי עודכן: {$stats['updated']}\n";
+            $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+            $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+            $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
             $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
         } else {
-            $summary_message = "עדכון מלאי מ-SAP הושלם עם שגיאות\n\n";
+            $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
             $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
-            $summary_message .= "מלאי עודכן: {$stats['updated']}\n";
+            $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+            $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+            $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
             $summary_message .= "נכשלו: {$stats['not_found']}\n";
             $summary_message .= "שגיאות: {$stats['errors']}\n";
             $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
@@ -685,11 +781,11 @@ if (!function_exists('sap_update_variations_from_api')) {
 }
 
 /**
- * Daily import task - updates stock for all linked items
+ * Daily import task - updates stock and prices for all linked items
  */
 function sap_run_daily_import_task() {
     $log_output = sap_update_variations_from_api();
-    error_log('Daily SAP Stock Update: ' . strip_tags($log_output));
+    error_log('Daily SAP Stock & Price Update: ' . strip_tags($log_output));
     return $log_output;
 }
 
