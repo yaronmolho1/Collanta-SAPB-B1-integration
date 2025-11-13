@@ -1008,6 +1008,11 @@ function sap_handle_order_integration($order_id) {
             
             error_log('SAP Integration Telegram Error: ' . str_replace("\n", " | ", $telegram_error_message));
             
+            // Actually send the Telegram message
+            if (class_exists('SAP_Sync_Logger')) {
+                SAP_Sync_Logger::send_telegram_message($telegram_error_message);
+            }
+            
             if (class_exists('SAP_Sync_Logger')) {
                 SAP_Sync_Logger::log_sync_failure($order_id, $error_msg, $order_flow_response);
             }
@@ -1065,6 +1070,11 @@ function sap_handle_order_integration($order_id) {
                 
                 error_log('SAP Integration Telegram Success No Payment: ' . str_replace("\n", " | ", $telegram_success_no_payment));
                 
+                // Actually send the Telegram message
+                if (class_exists('SAP_Sync_Logger')) {
+                    SAP_Sync_Logger::send_telegram_message($telegram_success_no_payment);
+                }
+                
             } elseif ($bypass_payment_validation) {
                 // Admin/Affiliates user with payment data
                 $telegram_success_message = "✅ הזמנה נשלחה בהצלחה ל-SAP (דילוג אימות)\n" .
@@ -1074,6 +1084,11 @@ function sap_handle_order_integration($order_id) {
                                           "הודעה: {$success_message}";
                 
                 error_log('SAP Integration Telegram Success: ' . str_replace("\n", " | ", $telegram_success_message));
+                
+                // Actually send the Telegram message
+                if (class_exists('SAP_Sync_Logger')) {
+                    SAP_Sync_Logger::send_telegram_message($telegram_success_message);
+                }
             }
         } 
         // Handle partial success cases for admin/affiliates users (order created but invoice/payment might fail)
@@ -1257,12 +1272,17 @@ function sap_handle_order_integration_background($order_id) {
     $hook_lock_value = get_transient($hook_lock_key);
     
     if ($hook_lock_value) {
-        error_log('SAP Integration: Order ' . $order_id . ' hook already triggered recently (locked). Skipping duplicate hook execution.');
+        $current_hook = current_filter();
+        error_log('SAP Integration: Order ' . $order_id . ' hook already triggered recently (locked at ' . date('H:i:s', $hook_lock_value) . '). Skipping duplicate hook execution from: ' . $current_hook);
         return;
     }
     
-    // Set hook lock for 30 seconds to prevent duplicate hook triggers
-    set_transient($hook_lock_key, time(), 30);
+    // Set hook lock for 60 seconds to prevent duplicate hook triggers
+    $lock_time = time();
+    set_transient($hook_lock_key, $lock_time, 60);
+    
+    $current_hook = current_filter();
+    error_log('SAP Integration: Order ' . $order_id . ' hook lock set by: ' . $current_hook . ' at ' . date('H:i:s', $lock_time));
     
     // CRITICAL FIX: Re-validate order status before queuing
     $order = wc_get_order($order_id);
@@ -1315,6 +1335,13 @@ function sap_handle_admin_order_save($order_id, $post = null) {
         return;
     }
     if (isset($_REQUEST['bulk_edit'])) { // Skip bulk edits
+        return;
+    }
+
+    // CRITICAL FIX: Skip admin save hooks if this is a status change
+    // Status changes are handled by the dedicated status hooks
+    if (isset($_POST['order_status']) || isset($_POST['_status'])) {
+        error_log('SAP Integration: Skipping admin save hook - order status change detected, handled by status hooks');
         return;
     }
 

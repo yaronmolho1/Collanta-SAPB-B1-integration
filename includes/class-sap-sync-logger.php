@@ -322,7 +322,7 @@ class SAP_Sync_Logger {
     /**
      * Send message to Telegram
      */
-    private static function send_telegram_message($message) {
+    public static function send_telegram_message($message) {
         $bot_token = '8309945060:AAHKHfGtTf6D_U_JnapGrTHxOLcuht9ULA4';
         $chat_id = '5418067438';
         

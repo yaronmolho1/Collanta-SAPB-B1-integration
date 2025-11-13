@@ -296,7 +296,7 @@ if (!function_exists('sap_create_products_from_api')) {
             if (is_wp_error($creation_message)) {
                 echo "<p style='color: orange;'>אזהרה: שליחת התראת יצירה נכשלה: " . $creation_message->get_error_message() . "</p>";
                 error_log("SAP Creator: Creation notification failed: " . $creation_message->get_error_message());
-            } else {
+        } else {
                 echo "<p style='color: green;'>✅ התראת השלמת יצירה נשלחה בהצלחה.</p>";
                 error_log("SAP Creator: Creation completion notification sent successfully");
             }
@@ -421,6 +421,9 @@ function sap_create_variable_product($items, $sww, $token) {
                  ", U_SiteItemID: " . ($first_item['U_SiteItemID'] ?? 'not_set'));
     }
     
+    // Pre-calculate parent attributes for both new and existing parents
+    $parent_attributes_to_apply = sap_create_variation_attributes($items);
+    
     // Check if any item has U_SiteGroupID filled (existing parent)
     $existing_parent_id = null;
     foreach ($items as $item) {
@@ -440,6 +443,72 @@ function sap_create_variable_product($items, $sww, $token) {
             error_log("SAP Creator: Using existing parent {$parent_id} for SWW {$sww}");
         } else {
             error_log("SAP Creator: U_SiteGroupID {$existing_parent_id} points to invalid parent, creating new");
+        }
+    }
+    
+    // Fallback: Try to find existing parent by custom meta (_sap_sww)
+    if (!$parent_id) {
+        $existing_by_meta = get_posts([
+            'post_type'      => 'product',
+            'posts_per_page' => 1,
+            'post_status'    => 'any',
+            'meta_key'       => '_sap_sww',
+            'meta_value'     => $sww,
+            'fields'         => 'ids',
+        ]);
+        
+        if (!empty($existing_by_meta)) {
+            $maybe_parent = wc_get_product($existing_by_meta[0]);
+            if ($maybe_parent && $maybe_parent->is_type('variable')) {
+                $parent_product = $maybe_parent;
+                $parent_id = $maybe_parent->get_id();
+                error_log("SAP Creator: Found existing parent {$parent_id} for SWW {$sww} via _sap_sww meta");
+            }
+        }
+    }
+    
+    // Fallback: Try to find existing parent by product title (SWW)
+    if (!$parent_id) {
+        $existing_product = get_page_by_title($sww, OBJECT, 'product');
+        if ($existing_product) {
+            $maybe_parent = wc_get_product($existing_product->ID);
+            if ($maybe_parent && $maybe_parent->is_type('variable')) {
+                $parent_product = $maybe_parent;
+                $parent_id = $maybe_parent->get_id();
+                error_log("SAP Creator: Found existing parent {$parent_id} for SWW {$sww} by title lookup");
+            }
+        }
+    }
+    
+    // If parent already exists, ensure attributes include new values
+    if ($parent_id && isset($parent_product) && $parent_product instanceof WC_Product_Variable) {
+        if (!empty($parent_attributes_to_apply)) {
+            $existing_attributes = $parent_product->get_attributes();
+            if (!is_array($existing_attributes)) {
+                $existing_attributes = [];
+            }
+            
+            foreach ($parent_attributes_to_apply as $taxonomy => $new_attribute) {
+                if (isset($existing_attributes[$taxonomy]) && $existing_attributes[$taxonomy] instanceof WC_Product_Attribute) {
+                    $existing_attribute = $existing_attributes[$taxonomy];
+                    $existing_options = array_map('strval', (array)$existing_attribute->get_options());
+                    $new_options = array_map('strval', (array)$new_attribute->get_options());
+                    $merged_options = array_unique(array_merge($existing_options, $new_options));
+                    
+                    $existing_attribute->set_options($merged_options);
+                    $existing_attribute->set_visible(true);
+                    $existing_attribute->set_variation(true);
+                    $existing_attributes[$taxonomy] = $existing_attribute;
+                    
+                    error_log("SAP Creator: Updated existing parent attribute {$taxonomy} with options: " . implode(', ', $merged_options));
+                } else {
+                    $existing_attributes[$taxonomy] = $new_attribute;
+                    error_log("SAP Creator: Added missing parent attribute {$taxonomy} for existing parent {$parent_id}");
+                }
+            }
+            
+            $parent_product->set_attributes($existing_attributes);
+            $parent_product->save();
         }
     }
     
@@ -486,13 +555,15 @@ function sap_create_variable_product($items, $sww, $token) {
         }
         
         // Set parent attributes (for variation use)
-        $parent_attributes = sap_create_variation_attributes($items);
-        if (!empty($parent_attributes)) {
-            $parent_product->set_attributes($parent_attributes);
-            error_log("SAP Creator: Set " . count($parent_attributes) . " attributes on parent product for SWW {$sww}");
+        if (!empty($parent_attributes_to_apply)) {
+            $parent_product->set_attributes($parent_attributes_to_apply);
+            error_log("SAP Creator: Set " . count($parent_attributes_to_apply) . " attributes on parent product for SWW {$sww}");
         } else {
             error_log("SAP Creator: WARNING - No parent attributes created for SWW {$sww}");
         }
+        
+        // Store SWW meta to help future lookups
+        $parent_product->update_meta_data('_sap_sww', $sww);
         
         $parent_id = $parent_product->save();
         
@@ -1780,35 +1851,57 @@ function sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id,
  * @return bool True on success, false on failure
  */
 function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) {
-    // PERFORMANCE OPTIMIZATION: Collect data instead of real-time SAP updates (like creation_old.php)
     global $sap_creator_patch_data_collection;
     
-    // Initialize collection array if not exists
     if (!isset($sap_creator_patch_data_collection)) {
         $sap_creator_patch_data_collection = [];
     }
     
-    // Validate inputs
-    if (empty($item_code)) {
-        error_log("SAP Creator: Invalid ItemCode for data collection");
+    if (empty($item_code) || empty($token)) {
+        error_log("SAP Creator: Invalid parameters for SAP update - ItemCode: {$item_code}");
         return false;
     }
     
-    // Collect the update data for batch processing later
+    // Collect data for summary/debug output
     $sap_creator_patch_data_collection[] = [
         'ItemCode' => $item_code,
         'U_EM_SiteGroupID' => (string)$site_group_id,
         'U_EM_SiteItemID' => (string)$site_item_id
     ];
     
-    // Minimal logging for performance (log every 10th item only)
-    static $update_count = 0;
-    $update_count++;
-    if ($update_count % 10 === 0) {
-        error_log("SAP Creator: Collected {$update_count} SAP updates so far...");
+    $update_data = [
+        'U_SiteGroupID' => (string)$site_group_id,
+        'U_SiteItemID' => (string)$site_item_id
+    ];
+    
+    $endpoint = 'Items/' . urlencode($item_code);
+    
+    error_log("SAP Creator: Updating SAP item {$item_code} with GroupID={$site_group_id}, ItemID={$site_item_id}");
+    
+    $response = sap_api_patch($endpoint, $update_data, $token);
+    
+    if (is_wp_error($response)) {
+        $error_message = $response->get_error_message();
+        error_log("SAP Creator: SAP PATCH failed for {$item_code}: {$error_message}");
+        
+        if (strpos($error_message, '403') !== false) {
+            sap_creator_send_critical_error_notification(
+                "HTTP 403 Error",
+                "Failed to update SAP item {$item_code} - Permission denied. Check API credentials and permissions."
+            );
+        }
+        
+        // Fallback to POST method when PATCH not allowed
+        if (strpos($error_message, '405') !== false) {
+            error_log("SAP Creator: HTTP 405 for {$item_code} - trying POST fallback");
+            return sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id, $token);
+        }
+        
+        return false;
     }
     
-    return true; // Always return success for performance
+    error_log("SAP Creator: Successfully updated SAP for {$item_code}");
+    return true;
 }
 
 /**
@@ -1886,7 +1979,6 @@ function sap_creator_send_telegram_message($message) {
     $data = [
         'chat_id' => SAP_CREATOR_TELEGRAM_CHAT_ID,
         'text' => $message,
-        'parse_mode' => null, // Remove HTML parse mode to prevent parsing errors
         'disable_web_page_preview' => true
     ];
     
