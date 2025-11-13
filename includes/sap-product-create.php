@@ -973,36 +973,40 @@ function sap_create_variation_attributes($items) {
     
     // Size attribute (ID 4)
     if (!empty($size_values)) {
+        // CALL MODIFIED FUNCTION TO GET SLUGS
+        $size_slugs = sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
+        
         $size_attribute = new WC_Product_Attribute();
         $size_attribute->set_id(4); // Attribute ID 4
         $size_attribute->set_name('pa_size');
-        $size_attribute->set_options($size_values);
+        // CRITICAL FIX: Use slugs for options instead of raw values
+        $size_attribute->set_options($size_slugs);
         $size_attribute->set_position(0);
         $size_attribute->set_visible(true); // MUST be visible for variations to show on frontend
         $size_attribute->set_variation(true);
         
         $attributes_array['pa_size'] = $size_attribute;
         
-        // Ensure size taxonomy exists and terms are created
-        sap_ensure_attribute_terms('pa_size', 'Size', $size_values);
-        error_log("SAP Creator: Created size attribute with values: " . implode(', ', $size_values));
+        error_log("SAP Creator: Created size attribute with slugs: " . implode(', ', $size_slugs) . " (from values: " . implode(', ', $size_values) . ")");
     }
     
     // Color attribute (ID 3)
     if (!empty($color_values)) {
-        $color_attribute = new WC_Product_Attribute(); // FIX: This was missing!
+        // CALL MODIFIED FUNCTION TO GET SLUGS
+        $color_slugs = sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
+        
+        $color_attribute = new WC_Product_Attribute();
         $color_attribute->set_id(3); // Attribute ID 3
         $color_attribute->set_name('pa_color');
-        $color_attribute->set_options($color_values);
+        // CRITICAL FIX: Use slugs for options instead of raw values
+        $color_attribute->set_options($color_slugs);
         $color_attribute->set_position(1);
         $color_attribute->set_visible(true); // MUST be visible for variations to show on frontend
         $color_attribute->set_variation(true);
         
         $attributes_array['pa_color'] = $color_attribute;
         
-        // Ensure color taxonomy exists and terms are created
-        sap_ensure_attribute_terms('pa_color', 'Color', $color_values);
-        error_log("SAP Creator: Created color attribute with values: " . implode(', ', $color_values));
+        error_log("SAP Creator: Created color attribute with slugs: " . implode(', ', $color_slugs) . " (from values: " . implode(', ', $color_values) . ")");
     }
     
     error_log("SAP Creator: Returning " . count($attributes_array) . " parent attributes: " . implode(', ', array_keys($attributes_array)));
@@ -1227,11 +1231,12 @@ function sap_ensure_term_exists($taxonomy, $term_name, $term_slug) {
 
 /**
  * Ensure attribute taxonomy exists and create terms
- * Based on creation_old.php logic
+ * MODIFIED TO RETURN SLUGS for parent attribute compatibility
  *
  * @param string $taxonomy Taxonomy slug (e.g., 'pa_size')
  * @param string $label Attribute label (e.g., 'Size')
  * @param array $terms Array of term names
+ * @return array Array of sanitized term slugs
  */
 function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
     // Ensure taxonomy exists
@@ -1247,9 +1252,11 @@ function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
         
         if (is_wp_error($created_attr_id)) {
             error_log("SAP Creator: Failed to create attribute {$label}: " . $created_attr_id->get_error_message());
-            return;
+            return [];
         }
     }
+    
+    $term_slugs = []; // Initialize array to store slugs
     
     // Create terms if they don't exist
     foreach ($terms as $term_name) {
@@ -1262,9 +1269,13 @@ function sap_ensure_attribute_terms($taxonomy, $label, $terms) {
             $inserted_term = wp_insert_term($term_name, $taxonomy);
             if (is_wp_error($inserted_term)) {
                 error_log("SAP Creator: Failed to insert term {$term_name} for attribute {$taxonomy}: " . $inserted_term->get_error_message());
+                continue;
             }
         }
+        $term_slugs[] = $term_slug; // Collect the slug
     }
+    
+    return $term_slugs; // Return the collected slugs
 }
 
 /**
