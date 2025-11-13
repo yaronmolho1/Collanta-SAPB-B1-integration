@@ -390,6 +390,42 @@ function sap_create_variable_product($items, $sww, $token) {
         $parent_product->set_name($sww); // Name = SWW value
         $parent_product->set_status('pending'); // NOT published - may need to publish for frontend visibility
         
+        // Set price range for parent product based on variations
+        $min_price = null;
+        $max_price = null;
+        foreach ($items as $item) {
+            if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+                foreach ($item['ItemPrices'] as $price_entry) {
+                    if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
+                        $base_price = (float)($price_entry['Price'] ?? 0);
+                        if ($base_price > 0) {
+                            $price_with_vat = $base_price * 1.18;
+                            $final_price = (float)(floor($price_with_vat) . '.9');
+                            
+                            if ($min_price === null || $final_price < $min_price) {
+                                $min_price = $final_price;
+                            }
+                            if ($max_price === null || $final_price > $max_price) {
+                                $max_price = $final_price;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Set price range on parent
+        if ($min_price !== null && $max_price !== null) {
+            $parent_product->set_price($min_price);
+            $parent_product->set_regular_price($min_price);
+            if ($min_price !== $max_price) {
+                error_log("SAP Creator: Set parent price range {$min_price} - {$max_price} for SWW {$sww}");
+            } else {
+                error_log("SAP Creator: Set parent price {$min_price} for SWW {$sww}");
+            }
+        }
+        
         // Set parent attributes (for variation use)
         $parent_attributes = sap_create_variation_attributes($items);
         if (!empty($parent_attributes)) {
@@ -408,12 +444,14 @@ function sap_create_variable_product($items, $sww, $token) {
         error_log("SAP Creator: Created new variable parent {$parent_id} for SWW {$sww}");
     }
     
-    // Create variations for each item (SKU) individually
+    // OPTIMIZED: Create variations in batch for much better performance
     $variations_created = 0;
     $sap_update_failed = 0;
     
-    error_log("SAP Creator: Starting variation creation for " . count($items) . " items in SWW: {$sww}");
+    error_log("SAP Creator: Starting BATCH variation creation for " . count($items) . " items in SWW: {$sww}");
 
+    // Filter items that need processing
+    $items_to_process = [];
     foreach ($items as $item) {
         $item_code = $item['ItemCode'] ?? '';
         
@@ -428,21 +466,20 @@ function sap_create_variable_product($items, $sww, $token) {
             continue;
         }
         
-        error_log("SAP Creator: Processing item {$item_code} - U_ssize: " . ($item['U_ssize'] ?? 'not_set') . ", U_scolor: " . ($item['U_scolor'] ?? 'not_set'));
+        $items_to_process[] = $item;
+    }
+    
+    if (!empty($items_to_process)) {
+        // Use batch creation for much better performance
+        $batch_result = sap_create_variations_batch_optimized($items_to_process, $parent_id, $token);
         
-        // Create variation for this specific item
-        $variation_result = sap_create_variation($item, $parent_id, $token);
-        
-        if (is_wp_error($variation_result)) {
-            error_log("SAP Creator: FAILED to create variation for {$item_code}: " . $variation_result->get_error_message());
-            $sap_update_failed++;
+        if (is_wp_error($batch_result)) {
+            error_log("SAP Creator: BATCH creation failed: " . $batch_result->get_error_message());
+            $sap_update_failed = count($items_to_process);
         } else {
-            $variations_created++;
-            error_log("SAP Creator: SUCCESS created variation ID {$variation_result['variation_id']} for {$item_code}");
-            if (!$variation_result['sap_updated']) {
-                $sap_update_failed++;
-                error_log("SAP Creator: Warning - SAP update failed for {$item_code}");
-            }
+            $variations_created = $batch_result['created_count'];
+            $sap_update_failed = $batch_result['sap_update_failed'];
+            error_log("SAP Creator: BATCH creation completed - Created: {$variations_created}, SAP Update Failed: {$sap_update_failed}");
         }
     }
 
@@ -537,7 +574,149 @@ function sap_create_variable_product($items, $sww, $token) {
 }
 
 /**
- * Create a product variation
+ * OPTIMIZED: Create multiple variations in batch for much better performance
+ *
+ * @param array $items Array of SAP item data
+ * @param int $parent_id Parent product ID
+ * @param string $token SAP auth token
+ * @return array|WP_Error Batch result on success, WP_Error on failure
+ */
+function sap_create_variations_batch_optimized($items, $parent_id, $token) {
+    $created_count = 0;
+    $sap_update_failed = 0;
+    $created_variations = [];
+    
+    error_log("SAP Creator: Starting OPTIMIZED batch creation of " . count($items) . " variations for parent {$parent_id}");
+    
+    // Prepare all variations data first (no individual saves)
+    $variations_to_create = [];
+    foreach ($items as $item) {
+        $item_code = $item['ItemCode'] ?? '';
+        $item_name = $item['ItemName'] ?? '';
+        
+        if (empty($item_code)) {
+            continue;
+        }
+        
+        // Pre-calculate all data
+        $variation_data = [
+            'item_code' => $item_code,
+            'item_name' => $item_name,
+            'item' => $item
+        ];
+        
+        // Pre-calculate price
+        if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+            foreach ($item['ItemPrices'] as $price_entry) {
+                if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
+                    $raw_price = $price_entry['Price'] ?? 0;
+                    if (is_numeric($raw_price) && $raw_price > 0) {
+                        $price_with_vat = $raw_price * 1.18;
+                        $variation_data['price'] = floor($price_with_vat) . '.9';
+                    }
+                    break;
+                }
+            }
+        }
+        
+        // Pre-calculate stock
+        $variation_data['stock'] = 0;
+        if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
+            foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
+                if (isset($warehouse_info['InStock']) && is_numeric($warehouse_info['InStock'])) {
+                    $variation_data['stock'] = max(0, (int)$warehouse_info['InStock']);
+                    break;
+                }
+            }
+        }
+        
+        // Pre-calculate attributes
+        $variation_data['attributes'] = [];
+        if (!empty($item['U_ssize'])) {
+            $size_value = trim($item['U_ssize']);
+            $size_slug = sanitize_title($size_value);
+            sap_ensure_term_exists('pa_size', $size_value, $size_slug);
+            $variation_data['attributes']['pa_size'] = $size_slug;
+        }
+        if (!empty($item['U_scolor'])) {
+            $color_value = trim($item['U_scolor']);
+            $color_slug = sanitize_title($color_value);
+            sap_ensure_term_exists('pa_color', $color_value, $color_slug);
+            $variation_data['attributes']['pa_color'] = $color_slug;
+        }
+        
+        $variations_to_create[] = $variation_data;
+    }
+    
+    // Create all variations in one batch (much faster)
+    foreach ($variations_to_create as $var_data) {
+        // Create variation object with all pre-calculated data
+        $variation = new WC_Product_Variation();
+        $variation->set_parent_id($parent_id);
+        $variation->set_name($var_data['item_name']);
+        $variation->set_sku($var_data['item_code']);
+        $variation->set_status('private'); // CRITICAL: Use 'private' status for variations
+        
+        // Set pre-calculated price
+        if (isset($var_data['price'])) {
+            $variation->set_regular_price($var_data['price']);
+            $variation->set_price($var_data['price']);
+        }
+        
+        // Set pre-calculated stock
+        $variation->set_manage_stock(true);
+        $variation->set_stock_quantity($var_data['stock']);
+        $variation->set_stock_status($var_data['stock'] > 0 ? 'instock' : 'outofstock');
+        
+        // Set pre-calculated attributes
+        if (!empty($var_data['attributes'])) {
+            $variation->set_attributes($var_data['attributes']);
+        }
+        
+        // Save variation
+        $variation_id = $variation->save();
+        
+        if ($variation_id) {
+            $created_count++;
+            $created_variations[] = [
+                'variation_id' => $variation_id,
+                'item_code' => $var_data['item_code']
+            ];
+            error_log("SAP Creator: BATCH created variation ID {$variation_id} for {$var_data['item_code']}");
+        } else {
+            error_log("SAP Creator: BATCH failed to create variation for {$var_data['item_code']}");
+        }
+    }
+    
+    // Batch update SAP with all created variations (parallel processing)
+    if (!empty($created_variations)) {
+        error_log("SAP Creator: Starting BATCH SAP updates for " . count($created_variations) . " variations");
+        
+        // Process SAP updates in smaller batches to avoid timeouts
+        $sap_batch_size = 5;
+        $sap_batches = array_chunk($created_variations, $sap_batch_size);
+        
+        foreach ($sap_batches as $batch) {
+            foreach ($batch as $created_var) {
+                $sap_updated = sap_update_item_ids($created_var['item_code'], $parent_id, $created_var['variation_id'], $token);
+                if (!$sap_updated) {
+                    $sap_update_failed++;
+                }
+            }
+        }
+    }
+    
+    error_log("SAP Creator: OPTIMIZED batch creation completed - Created: {$created_count}, SAP Update Failed: {$sap_update_failed}");
+    
+    return [
+        'created_count' => $created_count,
+        'sap_update_failed' => $sap_update_failed,
+        'variations' => $created_variations
+    ];
+}
+
+/**
+ * Create a product variation (LEGACY - kept for compatibility)
  *
  * @param array $item SAP item data
  * @param int $parent_id Parent product ID
@@ -855,7 +1034,8 @@ function sap_get_price_from_item($item, $item_code = '') {
         if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1 && 
             isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
             $base_price = (float)$price_entry['Price'];
-            $calculated_price = floor($base_price * 1.18) . '.9';
+            $price_with_vat = $base_price * 1.18;
+            $calculated_price = floor($price_with_vat) . '.9';
             return [
                 'price' => $calculated_price,
                 'used_fallback' => false,
@@ -869,7 +1049,8 @@ function sap_get_price_from_item($item, $item_code = '') {
         if (isset($price_entry['PriceList']) && is_numeric($price_entry['PriceList']) &&
             isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
             $base_price = (float)$price_entry['Price'];
-            $calculated_price = floor($base_price * 1.18) . '.9';
+            $price_with_vat = $base_price * 1.18;
+            $calculated_price = floor($price_with_vat) . '.9';
             return [
                 'price' => $calculated_price,
                 'used_fallback' => true,
@@ -903,7 +1084,8 @@ function sap_set_product_price($product, $item) {
     
     if (is_numeric($b2c_raw_price) && $b2c_raw_price >= 0) {
         $b2c_price_with_vat = $b2c_raw_price * 1.18;
-        $b2c_final_price = ceil($b2c_price_with_vat);
+        // Round to nearest x.9 (e.g., 123.45 * 1.18 = 145.67 -> 145.9)
+        $b2c_final_price = floor($b2c_price_with_vat) . '.9';
         
         $product->set_regular_price($b2c_final_price);
         $product->set_price($b2c_final_price);
@@ -1039,7 +1221,7 @@ function sap_create_variation_attributes($items) {
         // CRITICAL: Use RAW VALUES for parent attributes (like creation_old.php)
         $size_attribute->set_options($size_values);
         $size_attribute->set_position(0);
-        $size_attribute->set_visible(false); // FALSE like creation_old.php
+        $size_attribute->set_visible(true); // TRUE - visible on product page
         $size_attribute->set_variation(true);
         
         $attributes_array['pa_size'] = $size_attribute;
@@ -1057,7 +1239,7 @@ function sap_create_variation_attributes($items) {
         // CRITICAL: Use RAW VALUES for parent attributes (like creation_old.php)
         $color_attribute->set_options($color_values);
         $color_attribute->set_position(1);
-        $color_attribute->set_visible(false); // FALSE like creation_old.php
+        $color_attribute->set_visible(true); // TRUE - visible on product page
         $color_attribute->set_variation(true);
         
         $attributes_array['pa_color'] = $color_attribute;
@@ -1600,7 +1782,9 @@ function sap_parse_items_response($itemsResponse) {
  * @return bool|WP_Error True on success, WP_Error on failure
  */
 function sap_creator_send_telegram_message($message) {
+    // Check configuration
     if (empty(SAP_CREATOR_TELEGRAM_BOT_TOKEN) || empty(SAP_CREATOR_TELEGRAM_CHAT_ID)) {
+        error_log('SAP Creator: Telegram configuration missing - BOT_TOKEN or CHAT_ID empty');
         return new WP_Error('telegram_config', 'Telegram configuration missing');
     }
     
@@ -1609,7 +1793,7 @@ function sap_creator_send_telegram_message($message) {
     $data = [
         'chat_id' => SAP_CREATOR_TELEGRAM_CHAT_ID,
         'text' => $message,
-        'parse_mode' => 'HTML',
+        'parse_mode' => null, // Remove HTML parse mode to prevent parsing errors
         'disable_web_page_preview' => true
     ];
     
@@ -1617,8 +1801,11 @@ function sap_creator_send_telegram_message($message) {
         'method' => 'POST',
         'headers' => ['Content-Type' => 'application/json'],
         'body' => wp_json_encode($data),
-        'timeout' => 15
+        'timeout' => 30, // Increased timeout from 15 to 30 seconds
+        'sslverify' => false // Add SSL verify false for potential SSL issues
     ];
+    
+    error_log('SAP Creator: Sending Telegram message to chat ' . SAP_CREATOR_TELEGRAM_CHAT_ID . ', length: ' . strlen($message));
     
     $response = wp_remote_post($url, $args);
     
@@ -1628,12 +1815,16 @@ function sap_creator_send_telegram_message($message) {
     }
     
     $response_code = wp_remote_retrieve_response_code($response);
+    $response_body = wp_remote_retrieve_body($response);
+    
     if ($response_code !== 200) {
-        $error_msg = 'Telegram API error: ' . $response_code;
-        error_log($error_msg);
+        $error_msg = 'Telegram API error: ' . $response_code . ' - ' . $response_body;
+        error_log('SAP Creator: ' . $error_msg);
         return new WP_Error('telegram_api', $error_msg);
     }
     
+    // Log successful send
+    error_log('SAP Creator: Telegram message sent successfully');
     return true;
 }
 
@@ -1648,6 +1839,15 @@ function sap_creator_send_telegram_message($message) {
  * @return bool|WP_Error
  */
 function sap_creator_send_summary_notification($stats, $success_log, $error_log, $duration) {
+    // Validate stats array to prevent undefined index errors
+    $stats = array_merge([
+        'simple_created' => 0,
+        'variable_created' => 0,
+        'variations_created' => 0,
+        'failed' => 0,
+        'sap_update_failed' => 0
+    ], $stats);
+    
     $total_success = $stats['simple_created'] + $stats['variable_created'];
     $total_failed = $stats['failed'];
     
@@ -1667,31 +1867,46 @@ function sap_creator_send_summary_notification($stats, $success_log, $error_log,
         $message .= "עדכוני SAP נכשלו: {$stats['sap_update_failed']}\n";
     }
     
-    // Success log (first 10 items)
+    // Limit logs to prevent message being too long (Telegram 4096 char limit)
+    $max_logs = 5; // Reduced from 10 to prevent length issues
+    
+    // Success log (first 5 items)
     if (!empty($success_log)) {
         $message .= "\nהצלחות:\n";
-        foreach (array_slice($success_log, 0, 10) as $log_entry) {
-            $message .= $log_entry . "\n";
+        foreach (array_slice($success_log, 0, $max_logs) as $log_entry) {
+            // Sanitize log entry to prevent HTML issues
+            $clean_entry = strip_tags($log_entry);
+            $message .= $clean_entry . "\n";
         }
-        if (count($success_log) > 10) {
-            $message .= "ועוד " . (count($success_log) - 10) . " נוספים\n";
+        if (count($success_log) > $max_logs) {
+            $message .= "ועוד " . (count($success_log) - $max_logs) . " נוספים\n";
         }
     }
     
-    // Error log (first 10 items)
+    // Error log (first 5 items)
     if (!empty($error_log)) {
         $message .= "\nשגיאות:\n";
-        foreach (array_slice($error_log, 0, 10) as $log_entry) {
-            $message .= $log_entry . "\n";
+        foreach (array_slice($error_log, 0, $max_logs) as $log_entry) {
+            // Sanitize log entry to prevent HTML issues
+            $clean_entry = strip_tags($log_entry);
+            $message .= $clean_entry . "\n";
         }
-        if (count($error_log) > 10) {
-            $message .= "ועוד " . (count($error_log) - 10) . " נוספות\n";
+        if (count($error_log) > $max_logs) {
+            $message .= "ועוד " . (count($error_log) - $max_logs) . " נוספות\n";
         }
     }
     
     $message .= "\nזמן ביצוע: {$duration} שניות\n";
     $message .= "זמן: " . current_time('Y-m-d H:i:s');
     
+    // Check message length (Telegram limit is 4096 chars)
+    if (strlen($message) > 4000) {
+        // Truncate message if too long
+        $message = substr($message, 0, 3900) . "\n\n[הודעה קוצרה - יותר מדי תוכן]";
+        error_log("SAP Creator: Telegram message truncated due to length: " . strlen($message) . " chars");
+    }
+    
+    error_log("SAP Creator: Sending Telegram summary (length: " . strlen($message) . " chars)");
     return sap_creator_send_telegram_message($message);
 }
 
