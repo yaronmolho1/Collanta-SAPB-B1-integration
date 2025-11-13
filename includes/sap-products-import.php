@@ -455,16 +455,18 @@ if (!function_exists('sap_update_variations_from_api')) {
         ],
         "filterObjects" => [
             [
-                "field" => "BarCode",
-                "fieldType" => "string",
+                "field" => "U_SiteItemID",
+                "fieldType" => "int",
                 "operator" => "!=",
-                "fieldValue" => ""
+                "fieldValue" => "NULL",
+                "logicalOperator" => "OR"
             ],
             [
-                "field" => "BarCode",
-                "fieldType" => "string",
+                "field" => "U_SiteGroupID",
+                "fieldType" => "int",
                 "operator" => "!=",
-                "fieldValue" => "0"
+                "fieldValue" => "NULL",
+                "logicalOperator" => "OR"
             ]
         ],
         "orderByObjects" => [
