@@ -707,73 +707,41 @@ if (!function_exists('sap_update_variations_from_api')) {
     echo "<li>שגיאות: {$stats['errors']}</li>";
     echo "</ul>";
 
-    // Send completion notification in Hebrew
+    // Send completion notification in Hebrew - ALWAYS use summary format (no duplicates)
+    $summary_message = "";
     if (empty($failed_items)) {
-        // Success - all items updated
-        $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
-        $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-        $complete_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
-        $complete_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
-        $complete_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
-        $complete_message .= "זמן: " . current_time('Y-m-d H:i:s');
+        $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
+        $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
+        $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+        $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+        $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
+        $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
     } else {
-        // Partial failure - list failed items
-        $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
-        $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-        $complete_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
-        $complete_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
-        $complete_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
-        $complete_message .= "נכשלו: {$stats['not_found']}\n";
-        $complete_message .= "שגיאות: {$stats['errors']}\n\n";
-        
-        $complete_message .= "פריטים שנכשלו:\n";
-        foreach ($failed_items as $failed) {
-            $complete_message .= "- {$failed['item_code']} ({$failed['reason']})\n";
-        }
-        
-        $complete_message .= "\nזמן: " . current_time('Y-m-d H:i:s');
+        $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
+        $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
+        $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
+        $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
+        $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
+        $summary_message .= "נכשלו: {$stats['not_found']}\n";
+        $summary_message .= "שגיאות: {$stats['errors']}\n";
+        $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
     }
     
-    // Split long messages to avoid Telegram 4096 character limit
-    if (strlen($complete_message) > 4000) {
-        // Send summary first
-        $summary_message = "";
-        if (empty($failed_items)) {
-            $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
-            $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
-            $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
-            $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
-            $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
-            $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
-        } else {
-            $summary_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
-            $summary_message .= "פריטים שעובדו: {$stats['processed']}\n";
-            $summary_message .= "מלאי בלבד עודכן: {$stats['stock_updated']}\n";
-            $summary_message .= "מחיר בלבד עודכן: {$stats['price_updated']}\n";
-            $summary_message .= "מלאי ומחיר עודכנו: {$stats['both_updated']}\n";
-            $summary_message .= "נכשלו: {$stats['not_found']}\n";
-            $summary_message .= "שגיאות: {$stats['errors']}\n";
-            $summary_message .= "זמן: " . current_time('Y-m-d H:i:s');
-        }
+    // Always send the summary message first
+    sap_send_telegram_message($summary_message);
+    
+    // Send failed items in batches if there are any (separate messages)
+    if (!empty($failed_items)) {
+        $batch_size = 20; // 20 items per message to stay under limit
+        $batches = array_chunk($failed_items, $batch_size);
         
-        sap_send_telegram_message($summary_message);
-        
-        // Send failed items in batches if there are any
-        if (!empty($failed_items)) {
-            $batch_size = 20; // 20 items per message to stay under limit
-            $batches = array_chunk($failed_items, $batch_size);
-            
-            foreach ($batches as $batch_index => $batch) {
-                $batch_message = "פריטים שנכשלו (חלק " . ($batch_index + 1) . "/" . count($batches) . "):\n\n";
-                foreach ($batch as $failed) {
-                    $batch_message .= "- {$failed['item_code']} ({$failed['reason']})\n";
-                }
-                sap_send_telegram_message($batch_message);
+        foreach ($batches as $batch_index => $batch) {
+            $batch_message = "פריטים שנכשלו (חלק " . ($batch_index + 1) . "/" . count($batches) . "):\n\n";
+            foreach ($batch as $failed) {
+                $batch_message .= "- {$failed['item_code']} ({$failed['reason']})\n";
             }
+            sap_send_telegram_message($batch_message);
         }
-    } else {
-        // Message is short enough, send as is
-        sap_send_telegram_message($complete_message);
     }
 
     return ob_get_clean();
