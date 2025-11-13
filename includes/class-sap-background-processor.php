@@ -480,15 +480,19 @@ class SAP_Background_Processor {
             // Send the EXACT same notification format as sap-products-import.php
             if (!$has_failures && $stats['processed'] > 0) {
                 // Success - all items updated
-                $complete_message = "עדכון מלאי מ-SAP הושלם בהצלחה\n\n";
+                $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם בהצלחה\n\n";
                 $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-                $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                $complete_message .= "מלאי בלבד עודכן: " . ($stats['stock_updated'] ?? $stats['updated']) . "\n";
+                $complete_message .= "מחיר בלבד עודכן: " . ($stats['price_updated'] ?? 0) . "\n";
+                $complete_message .= "מלאי ומחיר עודכנו: " . ($stats['both_updated'] ?? 0) . "\n";
                 $complete_message .= "זמן: " . current_time('Y-m-d H:i:s');
             } else {
                 // Partial failure or errors
-                $complete_message = "עדכון מלאי מ-SAP הושלם עם שגיאות\n\n";
+                $complete_message = "עדכון מלאי ומחירים מ-SAP הושלם עם שגיאות\n\n";
                 $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
-                $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                $complete_message .= "מלאי בלבד עודכן: " . ($stats['stock_updated'] ?? $stats['updated']) . "\n";
+                $complete_message .= "מחיר בלבד עודכן: " . ($stats['price_updated'] ?? 0) . "\n";
+                $complete_message .= "מלאי ומחיר עודכנו: " . ($stats['both_updated'] ?? 0) . "\n";
                 $complete_message .= "נכשלו: {$stats['not_found']}\n";
                 $complete_message .= "שגיאות: {$stats['errors']}\n";
                 $complete_message .= "\nזמן: " . current_time('Y-m-d H:i:s');
@@ -502,7 +506,7 @@ class SAP_Background_Processor {
             }
             
             // Send using our notification method (since original telegram failed with 400 error)
-            self::send_telegram_notification("עדכון מלאי מ-SAP", $complete_message);
+            self::send_telegram_notification("עדכון מלאי ומחירים מ-SAP", $complete_message);
             
             error_log('SAP Background Processor: Stock update job completed successfully');
             
@@ -512,7 +516,7 @@ class SAP_Background_Processor {
             
             // Send error notification
             self::send_telegram_notification(
-                "עדכון מלאי מ-SAP נכשל",
+                "עדכון מלאי ומחירים מ-SAP נכשל",
                 "שגיאה: {$error_msg}\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name . "\nזמן: " . current_time('Y-m-d H:i:s')
             );
         }
