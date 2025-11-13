@@ -388,12 +388,15 @@ function sap_create_variable_product($items, $sww, $token) {
     if (!$parent_id) {
         $parent_product = new WC_Product_Variable();
         $parent_product->set_name($sww); // Name = SWW value
-        $parent_product->set_status('pending'); // NOT published
+        $parent_product->set_status('pending'); // NOT published - may need to publish for frontend visibility
         
         // Set parent attributes (for variation use)
         $parent_attributes = sap_create_variation_attributes($items);
         if (!empty($parent_attributes)) {
             $parent_product->set_attributes($parent_attributes);
+            error_log("SAP Creator: Set " . count($parent_attributes) . " attributes on parent product for SWW {$sww}");
+        } else {
+            error_log("SAP Creator: WARNING - No parent attributes created for SWW {$sww}");
         }
         
         $parent_id = $parent_product->save();
@@ -452,8 +455,29 @@ function sap_create_variable_product($items, $sww, $token) {
         // Update parent product price range after adding variations (like creation_old.php)
         $parent_product = wc_get_product($parent_id);
         if ($parent_product && $parent_product->is_type('variable')) {
+            error_log("SAP Creator: Starting sync for parent {$parent_id}");
+            
+            // Log current children before sync
+            $children_before = $parent_product->get_children();
+            error_log("SAP Creator: Parent {$parent_id} children before sync: " . count($children_before));
+            
             $parent_product->sync(false); // Sync variation prices to parent
             $parent_product->save(); // Save after sync
+            
+            // Verify after sync
+            $parent_product = wc_get_product($parent_id); // Refresh
+            $children_after = $parent_product->get_children();
+            $parent_attributes = $parent_product->get_attributes();
+            
+            error_log("SAP Creator: Parent {$parent_id} children after sync: " . count($children_after));
+            error_log("SAP Creator: Parent {$parent_id} attributes: " . implode(', ', array_keys($parent_attributes)));
+            
+            // Verify each attribute is visible and for variations
+            foreach ($parent_attributes as $attr_name => $attr) {
+                $is_visible = $attr->get_visible();
+                $is_variation = $attr->get_variation();
+                error_log("SAP Creator: Attribute {$attr_name}: visible={$is_visible}, variation={$is_variation}");
+            }
         }
         
         error_log("SAP Creator: Synced parent product {$parent_id} with {$variations_created} variations");
@@ -491,7 +515,7 @@ function sap_create_variation($item, $parent_id, $token) {
     $variation->set_parent_id($parent_id);
     $variation->set_name($item_name); // Name from ItemName
     $variation->set_sku($item_code);
-    $variation->set_status('pending'); // NOT published
+    $variation->set_status('pending'); // NOT published - may need to publish for frontend visibility
     error_log("SAP Creator: Basic variation properties set for {$item_code}");
     
     // Set price (SAP price × 1.18)
@@ -551,6 +575,17 @@ function sap_create_variation($item, $parent_id, $token) {
     }
     
     error_log("SAP Creator: Successfully saved variation ID {$variation_id} for {$item_code}");
+    
+    // Verify variation was created correctly
+    $saved_variation = wc_get_product($variation_id);
+    if ($saved_variation && $saved_variation->is_type('variation')) {
+        $var_parent_id = $saved_variation->get_parent_id();
+        $var_attributes = $saved_variation->get_attributes();
+        $var_status = $saved_variation->get_status();
+        error_log("SAP Creator: Variation {$variation_id} verification - Parent: {$var_parent_id}, Status: {$var_status}, Attrs: " . json_encode($var_attributes));
+    } else {
+        error_log("SAP Creator: ERROR - Variation {$variation_id} not found or wrong type after save");
+    }
     
     // Update SAP with IDs
     // U_SiteGroupID = Parent ID, U_SiteItemID = Variation ID
@@ -943,7 +978,7 @@ function sap_create_variation_attributes($items) {
         $size_attribute->set_name('pa_size');
         $size_attribute->set_options($size_values);
         $size_attribute->set_position(0);
-        $size_attribute->set_visible(false); // Match creation_old.php
+        $size_attribute->set_visible(true); // MUST be visible for variations to show on frontend
         $size_attribute->set_variation(true);
         
         $attributes_array['pa_size'] = $size_attribute;
@@ -960,7 +995,7 @@ function sap_create_variation_attributes($items) {
         $color_attribute->set_name('pa_color');
         $color_attribute->set_options($color_values);
         $color_attribute->set_position(1);
-        $color_attribute->set_visible(false); // Match creation_old.php
+        $color_attribute->set_visible(true); // MUST be visible for variations to show on frontend
         $color_attribute->set_variation(true);
         
         $attributes_array['pa_color'] = $color_attribute;

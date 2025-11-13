@@ -407,23 +407,102 @@ class SAP_Background_Processor {
             // Get item code filter if provided
             $item_code_filter = isset($args['item_code_filter']) ? $args['item_code_filter'] : null;
             
-            // Just call the function - it will send its own detailed notification
+            // Start output buffering to capture the result
+            ob_start();
             $result = sap_update_variations_from_api($item_code_filter);
+            $output = ob_get_clean();
             
-            // Send a simple background job completion confirmation
-            $success = !empty($result) && strpos($result, 'שגיאה') === false;
-            $status_text = $success ? "הושלם" : "הושלם עם שגיאות";
+            // Log the captured output for debugging
+            error_log("SAP Background Processor: Captured output length: " . strlen($output));
+            error_log("SAP Background Processor: Output sample: " . substr(strip_tags($output), 0, 300));
             
-            $message = "עדכון מלאי (רקע) {$status_text}\n\n";
-            $message .= "משתמש: " . get_user_by('id', $args['user_id'])->display_name . "\n";
-            $message .= "זמן: " . current_time('Y-m-d H:i:s');
+            // Extract detailed statistics from the HTML output
+            $stats = [
+                'processed' => 0,
+                'updated' => 0,
+                'not_found' => 0,
+                'errors' => 0
+            ];
             
-            if (!empty($item_code_filter)) {
-                $message .= "\nמסנן: {$item_code_filter}";
+            if (!empty($output)) {
+                $clean_output = strip_tags($output);
+                
+                // Extract statistics using regex - try both Hebrew and English patterns
+                if (preg_match('/פריטים שעובדו: (\d+)/', $clean_output, $matches)) {
+                    $stats['processed'] = intval($matches[1]);
+                } elseif (preg_match('/processed.*?(\d+)/i', $clean_output, $matches)) {
+                    $stats['processed'] = intval($matches[1]);
+                }
+                
+                if (preg_match('/מלאי עודכן: (\d+)/', $clean_output, $matches)) {
+                    $stats['updated'] = intval($matches[1]);
+                } elseif (preg_match('/updated.*?(\d+)/i', $clean_output, $matches)) {
+                    $stats['updated'] = intval($matches[1]);
+                }
+                
+                if (preg_match('/לא נמצאו: (\d+)/', $clean_output, $matches)) {
+                    $stats['not_found'] = intval($matches[1]);
+                } elseif (preg_match('/not.*?found.*?(\d+)/i', $clean_output, $matches)) {
+                    $stats['not_found'] = intval($matches[1]);
+                }
+                
+                if (preg_match('/שגיאות: (\d+)/', $clean_output, $matches)) {
+                    $stats['errors'] = intval($matches[1]);
+                } elseif (preg_match('/errors.*?(\d+)/i', $clean_output, $matches)) {
+                    $stats['errors'] = intval($matches[1]);
+                }
+                
+                // Log extracted stats
+                error_log("SAP Background Processor: Extracted stats: " . print_r($stats, true));
             }
             
-            // Send background job confirmation
-            self::send_telegram_notification("עדכון מלאי (רקע)", $message);
+            // Check if we got any meaningful stats
+            $has_stats = $stats['processed'] > 0 || $stats['updated'] > 0 || $stats['not_found'] > 0 || $stats['errors'] > 0;
+            
+            if (!$has_stats) {
+                // Fallback: try to count error log entries for this run
+                $error_log_content = file_get_contents(ini_get('error_log'));
+                $recent_errors = substr($error_log_content, -10000); // Last 10KB
+                
+                // Count "not found" errors in recent log
+                $not_found_count = preg_match_all('/SAP Stock Update: Item .* not found/', $recent_errors);
+                if ($not_found_count > 0) {
+                    $stats['not_found'] = $not_found_count;
+                    $stats['processed'] = $not_found_count;
+                }
+                
+                error_log("SAP Background Processor: Fallback stats from error log: " . print_r($stats, true));
+            }
+            
+            // Determine if there were failures
+            $has_failures = $stats['not_found'] > 0 || $stats['errors'] > 0;
+            
+            // Send the EXACT same notification format as sap-products-import.php
+            if (!$has_failures && $stats['processed'] > 0) {
+                // Success - all items updated
+                $complete_message = "עדכון מלאי מ-SAP הושלם בהצלחה\n\n";
+                $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
+                $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                $complete_message .= "זמן: " . current_time('Y-m-d H:i:s');
+            } else {
+                // Partial failure or errors
+                $complete_message = "עדכון מלאי מ-SAP הושלם עם שגיאות\n\n";
+                $complete_message .= "פריטים שעובדו: {$stats['processed']}\n";
+                $complete_message .= "מלאי עודכן: {$stats['updated']}\n";
+                $complete_message .= "נכשלו: {$stats['not_found']}\n";
+                $complete_message .= "שגיאות: {$stats['errors']}\n";
+                $complete_message .= "\nזמן: " . current_time('Y-m-d H:i:s');
+            }
+            
+            // Add user info for background processing
+            $complete_message .= "\n\nמשתמש: " . get_user_by('id', $args['user_id'])->display_name;
+            
+            if (!empty($item_code_filter)) {
+                $complete_message .= "\nמסנן: {$item_code_filter}";
+            }
+            
+            // Send using our notification method (since original telegram failed with 400 error)
+            self::send_telegram_notification("עדכון מלאי מ-SAP", $complete_message);
             
             error_log('SAP Background Processor: Stock update job completed successfully');
             
