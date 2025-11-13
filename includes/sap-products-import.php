@@ -334,7 +334,7 @@ function sap_get_price_from_item($item, $item_code = '') {
         if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1 && 
             isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
             $base_price = (float)$price_entry['Price'];
-            $calculated_price = floor($base_price * 5.18) . '.9';
+            $calculated_price = floor($base_price * 1.18) . '.9';
             return [
                 'price' => $calculated_price,
                 'used_fallback' => false,
@@ -348,7 +348,7 @@ function sap_get_price_from_item($item, $item_code = '') {
         if (isset($price_entry['PriceList']) && is_numeric($price_entry['PriceList']) &&
             isset($price_entry['Price']) && is_numeric($price_entry['Price']) && $price_entry['Price'] > 0) {
             $base_price = (float)$price_entry['Price'];
-            $calculated_price = floor($base_price * 5.18) . '.9';
+            $calculated_price = floor($base_price * 1.18) . '.9';
             return [
                 'price' => $calculated_price,
                 'used_fallback' => true,
