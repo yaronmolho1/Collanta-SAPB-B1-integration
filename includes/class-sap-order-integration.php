@@ -869,7 +869,7 @@ function sap_handle_order_integration($order_id) {
 
         $credit_card_data = null;
         
-        // Only process payment data if we have valid Yaad payment data or if payment validation was bypassed
+        // Process payment data if we have valid Yaad payment data (regardless of user role)
         if (($order_payment_method === 'yaad_sarig_credit_card' || $order_payment_method === 'yaadpay') && !empty($yaad_payment_data)) {
             
             $last_4_digits = '0000';
@@ -932,8 +932,26 @@ function sap_handle_order_integration($order_id) {
             error_log('SAP Integration: Credit card data: ' . json_encode($credit_card_data, JSON_PRETTY_PRINT));
         } else {
             if ($bypass_payment_validation) {
+                // Admin/Affiliates user sending order without payment data
+                $woo_order_number = $order->get_order_number();
+                $user_roles = $user ? $user->roles : [];
+                $user_role_display = !empty($user_roles) ? implode(', ', $user_roles) : 'guest';
+                
                 error_log('SAP Integration: Payment data skipped for authorized user (admin/affiliates) - Order ' . $order_id . ' will be sent without payment block');
                 $order->add_order_note('הזמנה נשלחת ל-SAP ללא בלוק תשלום (משתמש מורשה) - ייתכן שחשבונית לא תיפתח אוטומטית.');
+                
+                // Detailed Hebrew Telegram notification for order sent without payment data
+                $telegram_no_payment_message = "⚠️ הזמנה נשלחת ללא נתוני תשלום\n" .
+                                              "הזמנה WooCommerce: #{$woo_order_number}\n" .
+                                              "קוד לקוח SAP: {$sap_customer_code}\n" .
+                                              "אימייל לקוח: {$customer_email}\n" .
+                                              "שם לקוח: {$customer_full_name}\n" .
+                                              "תפקיד משתמש: {$user_role_display}\n" .
+                                              "סיבה: משתמש מורשה ללא נתוני תשלום\n" .
+                                              "סטטוס: הזמנה תישלח, חשבונית עלולה להיכשל";
+                
+                error_log('SAP Integration Telegram No Payment: ' . str_replace("\n", " | ", $telegram_no_payment_message));
+                
             } else {
                 error_log('SAP Integration: No credit card data or payment method not supported for order ' . $order_id);
                 $order->add_order_note('אזהרה: פרטי תשלום באשראי אינם זמינים או נתמכים עבור SAP.');
@@ -1029,8 +1047,26 @@ function sap_handle_order_integration($order_id) {
             error_log('SAP Integration: OrderFlow successfully sent to SAP. Order status changed to received. ' . $success_message . ($bypass_payment_validation ? ' (Payment validation bypassed for authorized user)' : ''));
             $order->add_order_note($hebrew_note);
             
-            // Hebrew Telegram logging for successful bypass processing
-            if ($bypass_payment_validation) {
+            // Hebrew Telegram logging for successful processing
+            if ($bypass_payment_validation && !$payment_data_for_sap) {
+                // Admin/Affiliates user sent order without payment data - this is the scenario you requested
+                $woo_order_number = $order->get_order_number();
+                $user_roles = $user ? $user->roles : [];
+                $user_role_display = !empty($user_roles) ? implode(', ', $user_roles) : 'guest';
+                
+                $telegram_success_no_payment = "✅ הזמנה נוצרה ב-SAP ללא תשלום\n" .
+                                              "הזמנה WooCommerce: #{$woo_order_number}\n" .
+                                              "קוד לקוח SAP: {$sap_customer_code}\n" .
+                                              "אימייל לקוח: {$customer_email}\n" .
+                                              "שם לקוח: {$customer_full_name}\n" .
+                                              "תפקיד משתמש: {$user_role_display}\n" .
+                                              "סטטוס: הזמנה נוצרה, חשבונית ותשלום דולגו\n" .
+                                              "הודעה: {$success_message}";
+                
+                error_log('SAP Integration Telegram Success No Payment: ' . str_replace("\n", " | ", $telegram_success_no_payment));
+                
+            } elseif ($bypass_payment_validation) {
+                // Admin/Affiliates user with payment data
                 $telegram_success_message = "✅ הזמנה נשלחה בהצלחה ל-SAP (דילוג אימות)\n" .
                                           "הזמנה #{$order_id}\n" .
                                           "סטטוס: התקבלה\n" .
@@ -1216,10 +1252,23 @@ function sap_handle_order_integration($order_id) {
 
 // Background-enabled SAP integration wrapper
 function sap_handle_order_integration_background($order_id) {
+    // CRITICAL FIX: Prevent duplicate hook execution with transient lock
+    $hook_lock_key = 'sap_hook_processing_order_' . $order_id;
+    $hook_lock_value = get_transient($hook_lock_key);
+    
+    if ($hook_lock_value) {
+        error_log('SAP Integration: Order ' . $order_id . ' hook already triggered recently (locked). Skipping duplicate hook execution.');
+        return;
+    }
+    
+    // Set hook lock for 30 seconds to prevent duplicate hook triggers
+    set_transient($hook_lock_key, time(), 30);
+    
     // CRITICAL FIX: Re-validate order status before queuing
     $order = wc_get_order($order_id);
     if (!$order || $order->get_status() !== 'processing') {
         error_log('SAP Integration: Background job cancelled - Order ' . $order_id . ' status is "' . ($order ? $order->get_status() : 'not found') . '", only processing orders allowed');
+        delete_transient($hook_lock_key); // Release hook lock
         return;
     }
     
@@ -1229,6 +1278,7 @@ function sap_handle_order_integration_background($order_id) {
     if ($emergency_mode) {
         error_log("SAP Integration: Emergency instant mode enabled - processing order {$order_id} synchronously");
         sap_handle_order_integration($order_id);
+        delete_transient($hook_lock_key); // Release hook lock
         return;
     }
     
@@ -1237,6 +1287,7 @@ function sap_handle_order_integration_background($order_id) {
         $job_id = SAP_Background_Processor::queue_order_integration($order_id);
         if ($job_id) {
             error_log("SAP Integration: Order {$order_id} queued for background processing (Job ID: {$job_id})");
+            delete_transient($hook_lock_key); // Release hook lock
             return;
         }
     }
@@ -1244,6 +1295,7 @@ function sap_handle_order_integration_background($order_id) {
     // Fallback to synchronous processing
     error_log("SAP Integration: Background processing unavailable for order {$order_id}, falling back to synchronous");
     sap_handle_order_integration($order_id);
+    delete_transient($hook_lock_key); // Release hook lock
 }
 
 // CRITICAL FIX: Use only one primary hook to prevent multiple executions

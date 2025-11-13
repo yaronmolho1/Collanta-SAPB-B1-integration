@@ -763,14 +763,29 @@ class SAP_Background_Processor {
             return false;
         }
         
+        // Check for pending jobs
         $pending_actions = as_get_scheduled_actions([
             'hook' => self::HOOK_ORDER_INTEGRATION,
             'status' => 'pending',
             'args' => [['order_id' => $order_id]],
-            'per_page' => 1
+            'per_page' => 5
         ]);
         
-        return !empty($pending_actions);
+        // Also check for in-progress jobs
+        $in_progress_actions = as_get_scheduled_actions([
+            'hook' => self::HOOK_ORDER_INTEGRATION,
+            'status' => 'in-progress',
+            'args' => [['order_id' => $order_id]],
+            'per_page' => 5
+        ]);
+        
+        $has_pending_or_in_progress = !empty($pending_actions) || !empty($in_progress_actions);
+        
+        if ($has_pending_or_in_progress) {
+            error_log("SAP Background Processor: Order {$order_id} already has " . count($pending_actions) . " pending and " . count($in_progress_actions) . " in-progress jobs");
+        }
+        
+        return $has_pending_or_in_progress;
     }
     
     /**
