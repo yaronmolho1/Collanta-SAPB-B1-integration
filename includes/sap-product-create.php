@@ -450,9 +450,14 @@ function sap_create_variable_product($items, $sww, $token) {
     
     // CRITICAL: Clear product cache to ensure variations are visible (like creation_old.php)
     if ($variations_created > 0) {
-        wc_delete_product_transients($parent_id);
+        error_log("SAP Creator: Starting post-creation sync for parent {$parent_id}");
         
-        // Update parent product price range after adding variations (like creation_old.php)
+        // Clear all caches first
+        wc_delete_product_transients($parent_id);
+        wp_cache_delete($parent_id, 'posts');
+        wp_cache_delete($parent_id, 'post_meta');
+        
+        // Get fresh parent product
         $parent_product = wc_get_product($parent_id);
         if ($parent_product && $parent_product->is_type('variable')) {
             error_log("SAP Creator: Starting sync for parent {$parent_id}");
@@ -461,11 +466,33 @@ function sap_create_variable_product($items, $sww, $token) {
             $children_before = $parent_product->get_children();
             error_log("SAP Creator: Parent {$parent_id} children before sync: " . count($children_before));
             
+            // Debug: Check if variations exist in database
+            global $wpdb;
+            $db_variations = $wpdb->get_results($wpdb->prepare(
+                "SELECT ID, post_title, post_status FROM {$wpdb->posts} WHERE post_parent = %d AND post_type = 'product_variation'",
+                $parent_id
+            ));
+            error_log("SAP Creator: Database shows " . count($db_variations) . " variations for parent {$parent_id}");
+            
+            // Log each variation found in DB
+            foreach ($db_variations as $db_var) {
+                error_log("SAP Creator: DB Variation ID {$db_var->ID}, Status: {$db_var->post_status}, Title: {$db_var->post_title}");
+            }
+            
+            // Force refresh parent product from database
+            wp_cache_delete($parent_id, 'posts');
+            clean_post_cache($parent_id);
+            $parent_product = wc_get_product($parent_id);
+            
             $parent_product->sync(false); // Sync variation prices to parent
             $parent_product->save(); // Save after sync
             
-            // Verify after sync
-            $parent_product = wc_get_product($parent_id); // Refresh
+            // Clear cache again after sync
+            wc_delete_product_transients($parent_id);
+            wp_cache_delete($parent_id, 'posts');
+            
+            // Verify after sync with fresh object
+            $parent_product = wc_get_product($parent_id); // Refresh again
             $children_after = $parent_product->get_children();
             $parent_attributes = $parent_product->get_attributes();
             
@@ -478,9 +505,27 @@ function sap_create_variable_product($items, $sww, $token) {
                 $is_variation = $attr->get_variation();
                 error_log("SAP Creator: Attribute {$attr_name}: visible={$is_visible}, variation={$is_variation}");
             }
+            
+            // If still no children, try manual refresh
+            if (count($children_after) === 0 && count($db_variations) > 0) {
+                error_log("SAP Creator: CRITICAL - Variations exist in DB but parent doesn't see them. Attempting manual refresh.");
+                
+                // Try to manually trigger variation detection
+                delete_transient('wc_product_children_' . $parent_id);
+                wp_cache_delete('wc_product_children_' . $parent_id);
+                
+                // Force WooCommerce to rebuild variation cache
+                $parent_product->sync_attributes();
+                $parent_product->save();
+                
+                // Final check
+                $parent_product = wc_get_product($parent_id);
+                $final_children = $parent_product->get_children();
+                error_log("SAP Creator: After manual refresh, parent {$parent_id} children: " . count($final_children));
+            }
         }
         
-        error_log("SAP Creator: Synced parent product {$parent_id} with {$variations_created} variations");
+        error_log("SAP Creator: Completed sync for parent product {$parent_id} with {$variations_created} variations");
     }
     
     return [
@@ -583,6 +628,19 @@ function sap_create_variation($item, $parent_id, $token) {
         $var_attributes = $saved_variation->get_attributes();
         $var_status = $saved_variation->get_status();
         error_log("SAP Creator: Variation {$variation_id} verification - Parent: {$var_parent_id}, Status: {$var_status}, Attrs: " . json_encode($var_attributes));
+        
+        // CRITICAL: Verify parent_id matches what we set
+        if ($var_parent_id != $parent_id) {
+            error_log("SAP Creator: CRITICAL ERROR - Variation {$variation_id} parent_id mismatch! Expected: {$parent_id}, Got: {$var_parent_id}");
+        }
+        
+        // Check if variation appears in parent's children immediately
+        $parent_check = wc_get_product($parent_id);
+        if ($parent_check) {
+            $current_children = $parent_check->get_children();
+            $is_child_found = in_array($variation_id, $current_children);
+            error_log("SAP Creator: Parent {$parent_id} currently has " . count($current_children) . " children, variation {$variation_id} found: " . ($is_child_found ? 'YES' : 'NO'));
+        }
     } else {
         error_log("SAP Creator: ERROR - Variation {$variation_id} not found or wrong type after save");
     }
