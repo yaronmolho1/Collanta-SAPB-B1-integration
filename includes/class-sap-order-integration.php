@@ -161,7 +161,23 @@ if (!function_exists('sap_api_post')) {
         // Handle JSON decode errors
         if (json_last_error() !== JSON_ERROR_NONE) {
             error_log('SAP API Post: JSON decode error for ' . $endpoint . ': ' . json_last_error_msg() . '. Raw body: ' . $body);
-            return new WP_Error('json_decode_error', 'Failed to decode JSON response from SAP API: ' . json_last_error_msg());
+            
+            // Try to clean the response and decode again
+            $cleaned_body = trim($body);
+            if (substr($cleaned_body, 0, 1) !== '{' && substr($cleaned_body, 0, 1) !== '[') {
+                // Response doesn't start with JSON, try to find JSON part
+                $json_start = strpos($cleaned_body, '{');
+                if ($json_start !== false) {
+                    $cleaned_body = substr($cleaned_body, $json_start);
+                    $decoded_body = json_decode($cleaned_body, true);
+                    if (json_last_error() === JSON_ERROR_NONE) {
+                        error_log('SAP API Post: Successfully decoded cleaned JSON for ' . $endpoint);
+                        return $decoded_body;
+                    }
+                }
+            }
+            
+            return new WP_Error('json_decode_error', 'Failed to decode JSON response from SAP API: ' . json_last_error_msg() . '. Raw response: ' . substr($body, 0, 200));
         }
 
         // **Fix: Handle nested JSON in 'data' field**
@@ -262,7 +278,23 @@ if (!function_exists('sap_api_post_orderflow')) {
         // Handle JSON decode errors
         if (json_last_error() !== JSON_ERROR_NONE) {
             error_log('SAP OrderFlow API Post: JSON decode error for ' . $endpoint . ': ' . json_last_error_msg() . '. Raw body: ' . $body);
-            return new WP_Error('json_decode_error', 'Failed to decode JSON response from SAP OrderFlow API: ' . json_last_error_msg());
+            
+            // Try to clean the response and decode again
+            $cleaned_body = trim($body);
+            if (substr($cleaned_body, 0, 1) !== '{' && substr($cleaned_body, 0, 1) !== '[') {
+                // Response doesn't start with JSON, try to find JSON part
+                $json_start = strpos($cleaned_body, '{');
+                if ($json_start !== false) {
+                    $cleaned_body = substr($cleaned_body, $json_start);
+                    $decoded_body = json_decode($cleaned_body, true);
+                    if (json_last_error() === JSON_ERROR_NONE) {
+                        error_log('SAP OrderFlow API Post: Successfully decoded cleaned JSON for ' . $endpoint);
+                        return $decoded_body;
+                    }
+                }
+            }
+            
+            return new WP_Error('json_decode_error', 'Failed to decode JSON response from SAP OrderFlow API: ' . json_last_error_msg() . '. Raw response: ' . substr($body, 0, 200));
         }
 
         // **Fix: Handle nested JSON in 'data' field**
@@ -461,10 +493,23 @@ if (!function_exists('sap_search_customer_by_email_and_phone')) {
  * @param int $order_id The ID of the WooCommerce order.
  */
 function sap_handle_order_integration($order_id) {
+    // CRITICAL FIX: Add execution lock to prevent duplicate processing
+    $lock_key = 'sap_processing_order_' . $order_id;
+    $lock_value = get_transient($lock_key);
+    
+    if ($lock_value) {
+        error_log('SAP Integration: Order ' . $order_id . ' is already being processed (locked). Skipping duplicate execution.');
+        return;
+    }
+    
+    // Set lock for 5 minutes to prevent duplicate processing
+    set_transient($lock_key, time(), 300);
+    
     $order = wc_get_order($order_id);
 
     if (!$order) {
         error_log('SAP Integration: Order not found for ID ' . $order_id);
+        delete_transient($lock_key); // Release lock
         return;
     }
 
@@ -479,6 +524,7 @@ function sap_handle_order_integration($order_id) {
         }
         
         $order->add_order_note('SAP Integration blocked: Only processing orders can be sent to SAP. Current status: "' . $current_status . '"');
+        delete_transient($lock_key); // Release lock
         return;
     }
 
@@ -523,6 +569,7 @@ function sap_handle_order_integration($order_id) {
             }
             
             $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data). Orders can only be sent to SAP after successful Yaad payment processing.');
+            delete_transient($lock_key); // Release lock
             return;
         }
         
@@ -540,6 +587,7 @@ function sap_handle_order_integration($order_id) {
             }
             
             $order->add_order_note('SAP Integration blocked: Payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'missing') . '). Orders can only be sent to SAP after successful payment.');
+            delete_transient($lock_key); // Release lock
             return;
         }
         
@@ -562,6 +610,7 @@ function sap_handle_order_integration($order_id) {
         // Only skip if already successful or in progress (no retry logic)
         if ($sync_record && in_array($sync_record->sync_status, ['success', 'in_progress'])) {
             error_log('SAP Integration: Order ' . $order_id . ' already synced or in progress. Skipping.');
+            delete_transient($lock_key); // Release lock
             return;
         }
     }
@@ -579,6 +628,7 @@ function sap_handle_order_integration($order_id) {
         if (class_exists('SAP_Sync_Logger')) {
             SAP_Sync_Logger::log_sync_failure($order_id, $error_msg);
         }
+        delete_transient($lock_key); // Release lock
         return;
     }
 
@@ -1157,6 +1207,9 @@ function sap_handle_order_integration($order_id) {
             SAP_Sync_Logger::log_sync_failure($order_id, $error_msg);
         }
     }
+    
+    // Release lock at the end of processing (success or failure)
+    delete_transient($lock_key);
 }
 
 // --- WooCommerce Hooks for SAP Integration ---
@@ -1193,14 +1246,12 @@ function sap_handle_order_integration_background($order_id) {
     sap_handle_order_integration($order_id);
 }
 
-// Triggers SAP integration when payment for order is completed
-add_action('woocommerce_payment_complete', 'sap_handle_order_integration_background', 20);
-
-// Triggers SAP integration when order status changes to "completed"
-add_action('woocommerce_order_status_completed', 'sap_handle_order_integration_background', 20);
-
-// Triggers SAP integration when order status changes to "processing"
+// CRITICAL FIX: Use only one primary hook to prevent multiple executions
+// Triggers SAP integration when order status changes to "processing" (this covers payment completion)
 add_action('woocommerce_order_status_processing', 'sap_handle_order_integration_background', 20);
+
+// Backup hook only for completed orders (in case processing was skipped)
+add_action('woocommerce_order_status_completed', 'sap_handle_order_integration_background', 20);
 
 // Triggers integration when order is saved/updated through WooCommerce admin interface
 // Handle both traditional and HPOS (High-Performance Order Storage) scenarios
