@@ -560,7 +560,7 @@ function sap_create_variation($item, $parent_id, $token) {
     $variation->set_parent_id($parent_id);
     $variation->set_name($item_name); // Name from ItemName
     $variation->set_sku($item_code);
-    $variation->set_status('pending'); // NOT published - may need to publish for frontend visibility
+    $variation->set_status('private'); // CRITICAL: Variations must be 'private' for WooCommerce to recognize them
     error_log("SAP Creator: Basic variation properties set for {$item_code}");
     
     // Set price (SAP price × 1.18)

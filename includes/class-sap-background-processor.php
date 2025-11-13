@@ -184,7 +184,7 @@ class SAP_Background_Processor {
                 case 'stock_update':
                     if (function_exists('sap_update_variations_from_api')) {
                         $item_code_filter = isset($args['item_code_filter']) ? $args['item_code_filter'] : null;
-                        return sap_update_variations_from_api($item_code_filter);
+                        return sap_update_variations_from_api($item_code_filter, false); // Disable notifications for background processing
                     }
                     break;
             }
@@ -409,7 +409,7 @@ class SAP_Background_Processor {
             
             // Start output buffering to capture the result
             ob_start();
-            $result = sap_update_variations_from_api($item_code_filter);
+            $result = sap_update_variations_from_api($item_code_filter, false); // Disable notifications - we'll send our own
             $output = ob_get_clean();
             
             // Log the captured output for debugging
