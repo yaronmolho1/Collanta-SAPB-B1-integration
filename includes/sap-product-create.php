@@ -786,6 +786,7 @@ function sap_update_sap_with_site_ids($items, $product_id, $variation_ids, $auth
  * @param string $item_code Item code for logging
  * @return array Array with 'price' (calculated price), 'used_fallback' (bool), 'pricelist_used' (int)
  */
+if (!function_exists('sap_get_price_from_item')) {
 function sap_get_price_from_item($item, $item_code = '') {
     if (!isset($item['ItemPrices']) || !is_array($item['ItemPrices'])) {
         return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
@@ -820,6 +821,7 @@ function sap_get_price_from_item($item, $item_code = '') {
     }
     
     return ['price' => null, 'used_fallback' => false, 'pricelist_used' => null];
+}
 }
 
 /**
