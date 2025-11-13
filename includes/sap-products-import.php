@@ -766,7 +766,7 @@ function sap_run_daily_import_task() {
 if (!function_exists('sap_schedule_daily_import')) {
     function sap_schedule_daily_import() {
     if ( ! wp_next_scheduled( 'sap_daily_import_event' ) ) {
-        wp_schedule_event( strtotime( '02:00:00' ), 'daily', 'sap_daily_import_event' );
+        wp_schedule_event( strtotime( '00:00:00' ), 'daily', 'sap_daily_import_event' );
     }
 }
 }

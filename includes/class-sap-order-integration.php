@@ -482,41 +482,73 @@ function sap_handle_order_integration($order_id) {
         return;
     }
 
+    // Check if user has admin privileges or affiliates role to bypass payment validation
+    $user_id = $order->get_customer_id();
+    $user = $user_id ? get_user_by('id', $user_id) : null;
+    $bypass_payment_validation = false;
+    
+    if ($user) {
+        // Check if user is admin or has affiliates role
+        if (user_can($user, 'manage_options') || in_array('affiliates', $user->roles)) {
+            $bypass_payment_validation = true;
+            $bypass_reason = user_can($user, 'manage_options') ? 'Admin user' : 'Affiliates role';
+            $bypass_reason_hebrew = user_can($user, 'manage_options') ? 'משתמש אדמין' : 'תפקיד שותפים';
+            
+            error_log('SAP Integration: Payment validation bypassed for Order ' . $order_id . ' - Reason: ' . $bypass_reason . ' (User ID: ' . $user_id . ')');
+            $order->add_order_note('אישור תשלום דולג עבור משתמש מורשה (' . $bypass_reason_hebrew . ') - הזמנה תישלח ל-SAP ללא אימות Yaad.');
+            
+            // Hebrew Telegram logging message
+            $telegram_message = "🔓 דילוג על אימות תשלום\n" .
+                              "הזמנה #{$order_id}\n" .
+                              "סיבה: {$bypass_reason_hebrew}\n" .
+                              "משתמש: {$user->display_name} (ID: {$user_id})\n" .
+                              "הזמנה תישלח ל-SAP ללא אימות Yaad";
+            
+            error_log('SAP Integration Telegram: ' . str_replace("\n", " | ", $telegram_message));
+        }
+    }
+
     // CRITICAL FIX: MANDATORY Yaad payment validation - NO order can be sent to SAP without valid Yaad payment token
+    // UNLESS user is admin or has affiliates role
     $payment_method = $order->get_payment_method();
     $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
     
-    // Block if no Yaad payment data exists at all
-    if (empty($yaad_payment_data)) {
-        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed). Payment method: ' . $payment_method);
-        
-        if (class_exists('SAP_Sync_Logger')) {
-            SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed. No order can be sent to SAP without Yaad payment token.");
+    if (!$bypass_payment_validation) {
+        // Block if no Yaad payment data exists at all
+        if (empty($yaad_payment_data)) {
+            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' missing yaad_credit_card_payment data (payment not completed). Payment method: ' . $payment_method);
+            
+            if (class_exists('SAP_Sync_Logger')) {
+                SAP_Sync_Logger::log_sync_blocked($order_id, "Missing yaad_credit_card_payment data - payment not completed. No order can be sent to SAP without Yaad payment token.");
+            }
+            
+            $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data). Orders can only be sent to SAP after successful Yaad payment processing.');
+            return;
         }
         
-        $order->add_order_note('SAP Integration blocked: Payment not completed (missing Yaad payment data). Orders can only be sent to SAP after successful Yaad payment processing.');
-        return;
-    }
-    
-    // Parse Yaad payment data to check CCode (0 = success) and ACode (approval code)
-    parse_str($yaad_payment_data, $yaad_parsed);
-    $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
-    $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
-    
-    // Block if payment was not successful
-    if ($ccode !== '0' || empty($acode)) {
-        error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'empty') . ')');
+        // Parse Yaad payment data to check CCode (0 = success) and ACode (approval code)
+        parse_str($yaad_payment_data, $yaad_parsed);
+        $ccode = isset($yaad_parsed['CCode']) ? $yaad_parsed['CCode'] : null;
+        $acode = isset($yaad_parsed['ACode']) ? $yaad_parsed['ACode'] : null;
         
-        if (class_exists('SAP_Sync_Logger')) {
-            SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed or incomplete - CCode: {$ccode}, ACode: " . ($acode ?: 'empty') . ". CCode must be '0' and ACode must exist.");
+        // Block if payment was not successful
+        if ($ccode !== '0' || empty($acode)) {
+            error_log('SAP Integration: BLOCKED - Order ' . $order_id . ' payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'empty') . ')');
+            
+            if (class_exists('SAP_Sync_Logger')) {
+                SAP_Sync_Logger::log_sync_blocked($order_id, "Payment failed or incomplete - CCode: {$ccode}, ACode: " . ($acode ?: 'empty') . ". CCode must be '0' and ACode must exist.");
+            }
+            
+            $order->add_order_note('SAP Integration blocked: Payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'missing') . '). Orders can only be sent to SAP after successful payment.');
+            return;
         }
         
-        $order->add_order_note('SAP Integration blocked: Payment failed or incomplete (CCode: ' . $ccode . ', ACode: ' . ($acode ?: 'missing') . '). Orders can only be sent to SAP after successful payment.');
-        return;
+        // Log successful validation
+        error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
+    } else {
+        // Log bypass validation
+        error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment validation bypassed for authorized user');
     }
-    
-    // Log successful validation
-    error_log('SAP Integration: Order ' . $order_id . ' validated successfully - Status: processing, Payment: completed (CCode: 0, ACode: ' . $acode . ')');
 
     // Check if order should be synced (prevents duplicates) - NO RETRIES
     if (class_exists('SAP_Sync_Logger')) {
@@ -786,28 +818,25 @@ function sap_handle_order_integration($order_id) {
         $payment_transaction_id = $order->get_transaction_id(); // Reference / transaction number
 
         $credit_card_data = null;
-        if ($order_payment_method === 'yaad_sarig_credit_card' || $order_payment_method === 'yaadpay') {
-            
-            // Get Yaad payment data
-            $yaad_payment_data = $order->get_meta('yaad_credit_card_payment');
+        
+        // Only process payment data if we have valid Yaad payment data or if payment validation was bypassed
+        if (($order_payment_method === 'yaad_sarig_credit_card' || $order_payment_method === 'yaadpay') && !empty($yaad_payment_data)) {
             
             $last_4_digits = '0000';
             $card_exp_month = '12';
             $card_exp_year = '2025';
             $voucher_num = $payment_transaction_id ?: 'WC_ORDER_' . $order_id;
             
-            if (!empty($yaad_payment_data)) {
-                // Parse the yaad payment string to extract values
-                parse_str($yaad_payment_data, $yaad_parsed);
-                
-                // Extract values from parsed data
-                $last_4_digits = $yaad_parsed['L4digit'] ?? '0000';
-                $card_exp_month = $yaad_parsed['Tmonth'] ?? '12';
-                $card_exp_year = $yaad_parsed['Tyear'] ?? '2025';
-                
-                // Extract ACode for VoucherNum - this is the approval code from Yaad
-                $voucher_num = $yaad_parsed['ACode'] ?? ($payment_transaction_id ?: 'WC_ORDER_' . $order_id);
-            }
+            // Parse the yaad payment string to extract values
+            parse_str($yaad_payment_data, $yaad_parsed);
+            
+            // Extract values from parsed data
+            $last_4_digits = $yaad_parsed['L4digit'] ?? '0000';
+            $card_exp_month = $yaad_parsed['Tmonth'] ?? '12';
+            $card_exp_year = $yaad_parsed['Tyear'] ?? '2025';
+            
+            // Extract ACode for VoucherNum - this is the approval code from Yaad
+            $voucher_num = $yaad_parsed['ACode'] ?? ($payment_transaction_id ?: 'WC_ORDER_' . $order_id);
 
             // Expiration date in YYYY-MM-01T00:00:00Z format
             $card_valid_until = sprintf('%s-%s-01T00:00:00Z', $card_exp_year, str_pad($card_exp_month, 2, '0', STR_PAD_LEFT));
@@ -834,8 +863,7 @@ function sap_handle_order_integration($order_id) {
                 "CreditType"        => "cr_Regular", // Regular credit type
                 "SplitPayments"     => "tNO", // No split payments
             ];
-        }
-        if ($credit_card_data) {
+            
             $payment_data_for_sap = [
                 "CardCode"      => $sap_customer_code,
                 "Reference1"    => (string) $order->get_order_number(), // Use Reference1 for order number
@@ -853,9 +881,14 @@ function sap_handle_order_integration($order_id) {
             error_log('SAP Integration: Payment data configured - Series: 81, Customer: ' . $sap_customer_code . ', OrderRef: ' . $order->get_order_number());
             error_log('SAP Integration: Credit card data: ' . json_encode($credit_card_data, JSON_PRETTY_PRINT));
         } else {
-            error_log('SAP Integration: No credit card data or payment method not supported for order ' . $order_id);
+            if ($bypass_payment_validation) {
+                error_log('SAP Integration: Payment data skipped for authorized user (admin/affiliates) - Order ' . $order_id . ' will be sent without payment block');
+                $order->add_order_note('הזמנה נשלחת ל-SAP ללא בלוק תשלום (משתמש מורשה) - ייתכן שחשבונית לא תיפתח אוטומטית.');
+            } else {
+                error_log('SAP Integration: No credit card data or payment method not supported for order ' . $order_id);
+                $order->add_order_note('אזהרה: פרטי תשלום באשראי אינם זמינים או נתמכים עבור SAP.');
+            }
             $payment_data_for_sap = null; // Don't send Payment block if no credit card data
-            $order->add_order_note('אזהרה: פרטי תשלום באשראי אינם זמינים או נתמכים עבור SAP.');
         }
 
         // --- Build unified payload for OrderFlow ---
@@ -897,6 +930,16 @@ function sap_handle_order_integration($order_id) {
             $error_msg = 'Error sending OrderFlow to SAP: ' . $order_flow_response->get_error_message();
             error_log('SAP Integration: ' . $error_msg);
             $order->add_order_note('שגיאה בשליחת OrderFlow ל-SAP: ' . $order_flow_response->get_error_message());
+            
+            // Hebrew Telegram notification for OrderFlow error
+            $telegram_error_message = "❌ שגיאה בשליחת OrderFlow ל-SAP\n" .
+                                    "הזמנה #{$order_id}\n" .
+                                    "לקוח: {$customer_full_name}\n" .
+                                    "שגיאה: " . $order_flow_response->get_error_message() . "\n" .
+                                    "סטטוס: נכשל";
+            
+            error_log('SAP Integration Telegram Error: ' . str_replace("\n", " | ", $telegram_error_message));
+            
             if (class_exists('SAP_Sync_Logger')) {
                 SAP_Sync_Logger::log_sync_failure($order_id, $error_msg, $order_flow_response);
             }
@@ -921,20 +964,187 @@ function sap_handle_order_integration($order_id) {
             $doc_entries = [
                 'customer_doc_entry' => $sap_customer_code,
                 'order_doc_entry' => 'created',
-                'invoice_doc_entry' => 'created', 
-                'payment_doc_entry' => 'created'
+                'invoice_doc_entry' => $payment_data_for_sap ? 'created' : 'skipped_no_payment', 
+                'payment_doc_entry' => $payment_data_for_sap ? 'created' : 'skipped_no_payment'
             ];
             
             if (class_exists('SAP_Sync_Logger')) {
                 SAP_Sync_Logger::log_sync_success($order_id, $order_flow_response, $doc_entries);
             }
             
-            error_log('SAP Integration: OrderFlow successfully sent to SAP. Order status changed to received. ' . $success_message);
-            $order->add_order_note('הזמנה נשלחה בהצלחה ל-SAP ושונתה לסטטוס "התקבלה": ' . $success_message);
+            $hebrew_note = $bypass_payment_validation ? 
+                'הזמנה נשלחה בהצלחה ל-SAP (משתמש מורשה) ושונתה לסטטוס "התקבלה": ' . $success_message :
+                'הזמנה נשלחה בהצלחה ל-SAP ושונתה לסטטוס "התקבלה": ' . $success_message;
+            
+            error_log('SAP Integration: OrderFlow successfully sent to SAP. Order status changed to received. ' . $success_message . ($bypass_payment_validation ? ' (Payment validation bypassed for authorized user)' : ''));
+            $order->add_order_note($hebrew_note);
+            
+            // Hebrew Telegram logging for successful bypass processing
+            if ($bypass_payment_validation) {
+                $telegram_success_message = "✅ הזמנה נשלחה בהצלחה ל-SAP (דילוג אימות)\n" .
+                                          "הזמנה #{$order_id}\n" .
+                                          "סטטוס: התקבלה\n" .
+                                          "משתמש מורשה: {$user->display_name}\n" .
+                                          "הודעה: {$success_message}";
+                
+                error_log('SAP Integration Telegram Success: ' . str_replace("\n", " | ", $telegram_success_message));
+            }
+        } 
+        // Handle partial success cases for admin/affiliates users (order created but invoice/payment might fail)
+        elseif ($bypass_payment_validation && 
+                isset($order_flow_response['apiResponse']['result']) &&
+                (strpos(strtolower($order_flow_response['apiResponse']['result']['message'] ?? ''), 'order') !== false ||
+                 $order_flow_response['apiResponse']['result']['status'] === 0)) {
+            
+            // For admin/affiliates users, consider it successful if order was created, even if invoice/payment failed
+            $partial_success_message = $order_flow_response['apiResponse']['result']['message'] ?? 'Order created in SAP';
+            
+            $order->update_meta_data('_sap_sync_status', 'partial_success');
+            $order->update_meta_data('_sap_sync_message', $partial_success_message);
+            
+            // Change order status to custom "received" status
+            $order->update_status('received', 'Order created in SAP (authorized user) - Status changed to Received');
+            $order->save();
+            
+            $doc_entries = [
+                'customer_doc_entry' => $sap_customer_code,
+                'order_doc_entry' => 'created',
+                'invoice_doc_entry' => 'may_have_failed', 
+                'payment_doc_entry' => 'skipped_no_payment'
+            ];
+            
+            if (class_exists('SAP_Sync_Logger')) {
+                SAP_Sync_Logger::log_sync_success($order_id, $order_flow_response, $doc_entries);
+            }
+            
+            error_log('SAP Integration: Order created in SAP for authorized user (admin/affiliates). Invoice may not have opened. Order status changed to received. ' . $partial_success_message);
+            $order->add_order_note('הזמנה נוצרה בהצלחה ב-SAP (משתמש מורשה) ושונתה לסטטוס "התקבלה". ייתכן שחשבונית לא נפתחה: ' . $partial_success_message);
+            
+            // Hebrew Telegram logging for partial success
+            $telegram_partial_message = "⚠️ הזמנה נוצרה ב-SAP (הצלחה חלקית)\n" .
+                                      "הזמנה #{$order_id}\n" .
+                                      "סטטוס: התקבלה\n" .
+                                      "משתמש מורשה: {$user->display_name}\n" .
+                                      "הערה: ייתכן שחשבונית לא נפתחה\n" .
+                                      "הודעה: {$partial_success_message}";
+            
+            error_log('SAP Integration Telegram Partial: ' . str_replace("\n", " | ", $telegram_partial_message));
         } else {
-            $error_msg = 'Failed to send OrderFlow to SAP or retrieve all DocEntries. Response structure unexpected.';
+            // Enhanced error detection for payment and invoice issues
+            $response_message = $order_flow_response['apiResponse']['result']['message'] ?? '';
+            $response_status = $order_flow_response['apiResponse']['result']['status'] ?? null;
+            
+            // Get user role information for detailed reporting
+            $user_roles = $user ? $user->roles : [];
+            $user_role_display = !empty($user_roles) ? implode(', ', $user_roles) : 'guest';
+            
+            // Check if order was created but invoice/payment failed
+            $order_created = (stripos($response_message, 'order') !== false && 
+                            (stripos($response_message, 'created') !== false || 
+                             stripos($response_message, 'success') !== false));
+            
+            // Detect specific payment/invoice issues
+            $is_payment_issue = (stripos($response_message, 'payment') !== false || 
+                               stripos($response_message, 'credit') !== false ||
+                               stripos($response_message, 'card') !== false);
+            
+            $is_invoice_issue = (stripos($response_message, 'invoice') !== false ||
+                               stripos($response_message, 'document') !== false);
+            
+            // CASE 1: Order created but invoice/payment failed
+            if ($order_created && ($is_payment_issue || $is_invoice_issue)) {
+                $woo_order_number = $order->get_order_number();
+                
+                if ($is_payment_issue) {
+                    $error_msg = 'Order created in SAP but payment processing failed: ' . $response_message;
+                    $hebrew_error = 'הזמנה נוצרה ב-SAP אך התשלום נכשל: ' . $response_message;
+                    
+                    // Detailed Hebrew Telegram notification for order created but payment failed
+                    $telegram_detailed_error = "⚠️ הזמנה נוצרה ב-SAP - תשלום נכשל\n" .
+                                             "הזמנה WooCommerce: #{$woo_order_number}\n" .
+                                             "קוד לקוח SAP: {$sap_customer_code}\n" .
+                                             "אימייל לקוח: {$customer_email}\n" .
+                                             "שם לקוח: {$customer_full_name}\n" .
+                                             "תפקיד משתמש: {$user_role_display}\n" .
+                                             "שגיאת תשלום: {$response_message}\n" .
+                                             "סטטוס: הזמנה נוצרה, תשלום נכשל";
+                    
+                } elseif ($is_invoice_issue) {
+                    $error_msg = 'Order created in SAP but invoice creation failed: ' . $response_message;
+                    $hebrew_error = 'הזמנה נוצרה ב-SAP אך החשבונית נכשלה: ' . $response_message;
+                    
+                    // Detailed Hebrew Telegram notification for order created but invoice failed
+                    $telegram_detailed_error = "⚠️ הזמנה נוצרה ב-SAP - חשבונית נכשלה\n" .
+                                             "הזמנה WooCommerce: #{$woo_order_number}\n" .
+                                             "קוד לקוח SAP: {$sap_customer_code}\n" .
+                                             "אימייל לקוח: {$customer_email}\n" .
+                                             "שם לקוח: {$customer_full_name}\n" .
+                                             "תפקיד משתמש: {$user_role_display}\n" .
+                                             "שגיאת חשבונית: {$response_message}\n" .
+                                             "סטטוס: הזמנה נוצרה, חשבונית נכשלה";
+                }
+                
+                error_log('SAP Integration Telegram Detailed Error: ' . str_replace("\n", " | ", $telegram_detailed_error));
+                
+                // Still change order status to received since order was created in SAP
+                $order->update_status('received', 'Order created in SAP but invoice/payment failed - Status changed to Received');
+                $order->save();
+                
+            } 
+            // CASE 2: Pure payment issue (no order creation)
+            elseif ($is_payment_issue) {
+                $error_msg = 'Payment processing failed in SAP OrderFlow: ' . $response_message;
+                $hebrew_error = 'שגיאה בעיבוד התשלום ב-SAP: ' . $response_message;
+                
+                // Hebrew Telegram notification for payment issue
+                $telegram_payment_error = "💳 שגיאה בעיבוד תשלום ב-SAP\n" .
+                                        "הזמנה #{$order_id}\n" .
+                                        "לקוח: {$customer_full_name}\n" .
+                                        "אימייל: {$customer_email}\n" .
+                                        "תפקיד: {$user_role_display}\n" .
+                                        "שגיאת תשלום: {$response_message}\n" .
+                                        "סטטוס: נכשל בתשלום";
+                
+                error_log('SAP Integration Telegram Payment Error: ' . str_replace("\n", " | ", $telegram_payment_error));
+                
+            } 
+            // CASE 3: Pure invoice issue (no order creation)
+            elseif ($is_invoice_issue) {
+                $error_msg = 'Invoice creation failed in SAP OrderFlow: ' . $response_message;
+                $hebrew_error = 'שגיאה ביצירת חשבונית ב-SAP: ' . $response_message;
+                
+                // Hebrew Telegram notification for invoice issue
+                $telegram_invoice_error = "🧾 שגיאה ביצירת חשבונית ב-SAP\n" .
+                                        "הזמנה #{$order_id}\n" .
+                                        "לקוח: {$customer_full_name}\n" .
+                                        "אימייל: {$customer_email}\n" .
+                                        "תפקיד: {$user_role_display}\n" .
+                                        "שגיאת חשבונית: {$response_message}\n" .
+                                        "סטטוס: נכשל בחשבונית";
+                
+                error_log('SAP Integration Telegram Invoice Error: ' . str_replace("\n", " | ", $telegram_invoice_error));
+                
+            } 
+            // CASE 4: General error
+            else {
+                $error_msg = 'Failed to send OrderFlow to SAP or retrieve all DocEntries. Response structure unexpected.';
+                $hebrew_error = 'שגיאה לא ידועה בשליחת OrderFlow ל-SAP או בקבלת כל ה-DocEntries.';
+                
+                // Hebrew Telegram notification for general error
+                $telegram_general_error = "⚠️ שגיאה כללית ב-OrderFlow\n" .
+                                        "הזמנה #{$order_id}\n" .
+                                        "לקוח: {$customer_full_name}\n" .
+                                        "אימייל: {$customer_email}\n" .
+                                        "תפקיד: {$user_role_display}\n" .
+                                        "שגיאה: {$response_message}\n" .
+                                        "סטטוס: נכשל";
+                
+                error_log('SAP Integration Telegram General Error: ' . str_replace("\n", " | ", $telegram_general_error));
+            }
+            
             error_log('SAP Integration: ' . $error_msg . ' Full response: ' . print_r($order_flow_response, true));
-            $order->add_order_note('שגיאה לא ידועה בשליחת OrderFlow ל-SAP או בקבלת כל ה-DocEntries.');
+            $order->add_order_note($hebrew_error);
+            
             if (class_exists('SAP_Sync_Logger')) {
                 SAP_Sync_Logger::log_sync_failure($order_id, $error_msg, $order_flow_response);
             }

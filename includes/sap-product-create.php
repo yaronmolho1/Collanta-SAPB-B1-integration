@@ -58,7 +58,13 @@ if (!function_exists('sap_create_products_from_api')) {
         $start_time = microtime(true);
         $start_message = "תחילת יצירת מוצרים מ-SAP\n";
         $start_message .= "זמן: " . current_time('Y-m-d H:i:s');
-        sap_creator_send_telegram_message($start_message);
+        $telegram_start_result = sap_creator_send_telegram_message($start_message);
+        
+        if (is_wp_error($telegram_start_result)) {
+            error_log("SAP Creator: Failed to send start notification: " . $telegram_start_result->get_error_message());
+        } else {
+            error_log("SAP Creator: Start notification sent successfully");
+        }
 
         // 1. Connect and get token
         echo "<p>⏳ מתחבר ל-SAP API...</p>";
@@ -214,8 +220,24 @@ if (!function_exists('sap_create_products_from_api')) {
         $error_log = [];
 
         // 6. Process each SWW group
+        $total_groups = count($sww_groups);
+        $processed_groups = 0;
+        
         foreach ($sww_groups as $sww => $group_items) {
-            echo "<li><strong>SWW: " . esc_html($sww) . "</strong> (" . count($group_items) . " פריטים)<br>";
+            $processed_groups++;
+            echo "<li><strong>SWW: " . esc_html($sww) . "</strong> (" . count($group_items) . " פריטים) - קבוצה {$processed_groups}/{$total_groups}<br>";
+            
+            // Send progress notification every 10 groups or for large groups
+            if ($processed_groups % 10 === 0 || count($group_items) > 15) {
+                $progress_message = "מעבד קבוצה {$processed_groups}/{$total_groups}\n";
+                $progress_message .= "SWW: {$sww} ({" . count($group_items) . "} פריטים)\n";
+                $progress_message .= "זמן: " . current_time('H:i:s');
+                
+                $progress_result = sap_creator_send_telegram_message($progress_message);
+                if (is_wp_error($progress_result)) {
+                    error_log("SAP Creator: Failed to send progress notification: " . $progress_result->get_error_message());
+                }
+            }
             
             if (count($group_items) === 1) {
                 // Single item → Create simple product
@@ -266,12 +288,49 @@ if (!function_exists('sap_create_products_from_api')) {
         $end_time = microtime(true);
         $duration = round($end_time - $start_time, 2);
 
-        // Send Telegram summary
-        $telegram_result = sap_creator_send_summary_notification($creation_stats, $creation_log, $error_log, $duration);
-        if (is_wp_error($telegram_result)) {
-            echo "<p style='color: orange;'>אזהרה: שליחת התראת טלגרם נכשלה: " . $telegram_result->get_error_message() . "</p>";
-        } else {
-            echo "<p style='color: green;'>התראת טלגרם נשלחה בהצלחה.</p>";
+        // PHASE 1 COMPLETE: Send creation completion notification
+        try {
+            error_log("SAP Creator: PHASE 1 COMPLETE - Sending creation summary notification");
+            $creation_message = sap_creator_send_creation_completion_notification($creation_stats, $creation_log, $error_log, $duration);
+            
+            if (is_wp_error($creation_message)) {
+                echo "<p style='color: orange;'>אזהרה: שליחת התראת יצירה נכשלה: " . $creation_message->get_error_message() . "</p>";
+                error_log("SAP Creator: Creation notification failed: " . $creation_message->get_error_message());
+            } else {
+                echo "<p style='color: green;'>✅ התראת השלמת יצירה נשלחה בהצלחה.</p>";
+                error_log("SAP Creator: Creation completion notification sent successfully");
+            }
+        } catch (Exception $e) {
+            echo "<p style='color: red;'>שגיאה בשליחת הודעת יצירה: " . $e->getMessage() . "</p>";
+            error_log("SAP Creator: Exception sending creation notification: " . $e->getMessage());
+        }
+
+        // Output collected SAP PATCH data
+        sap_creator_output_collected_patch_data($creation_stats);
+        
+        // PHASE 2: Process SAP updates individually
+        echo "<hr style='margin: 20px 0;'>";
+        echo "<h3>🔄 שלב 2: עדכון SAP</h3>";
+        echo "<p>מתחיל עדכון SAP עבור הפריטים שנוצרו...</p>";
+        flush();
+        
+        $sap_update_results = sap_creator_process_sap_updates_individually($token);
+        
+        // PHASE 2 COMPLETE: Send SAP update summary notification
+        try {
+            error_log("SAP Creator: PHASE 2 COMPLETE - Sending SAP update summary notification");
+            $sap_summary_result = sap_creator_send_sap_update_summary_notification($sap_update_results, $creation_stats);
+            
+            if (is_wp_error($sap_summary_result)) {
+                echo "<p style='color: orange;'>אזהרה: שליחת סיכום עדכון SAP נכשלה: " . $sap_summary_result->get_error_message() . "</p>";
+                error_log("SAP Creator: SAP summary notification failed: " . $sap_summary_result->get_error_message());
+            } else {
+                echo "<p style='color: green;'>✅ סיכום עדכון SAP נשלח בהצלחה.</p>";
+                error_log("SAP Creator: SAP update summary notification sent successfully");
+            }
+        } catch (Exception $e) {
+            echo "<p style='color: red;'>שגיאה בשליחת סיכום SAP: " . $e->getMessage() . "</p>";
+            error_log("SAP Creator: Exception sending SAP summary: " . $e->getMessage());
         }
 
         return ob_get_clean();
@@ -588,122 +647,174 @@ function sap_create_variations_batch_optimized($items, $parent_id, $token) {
     
     error_log("SAP Creator: Starting OPTIMIZED batch creation of " . count($items) . " variations for parent {$parent_id}");
     
-    // Prepare all variations data first (no individual saves)
-    $variations_to_create = [];
-    foreach ($items as $item) {
-        $item_code = $item['ItemCode'] ?? '';
-        $item_name = $item['ItemName'] ?? '';
-        
-        if (empty($item_code)) {
-            continue;
-        }
-        
-        // Pre-calculate all data
-        $variation_data = [
-            'item_code' => $item_code,
-            'item_name' => $item_name,
-            'item' => $item
-        ];
-        
-        // Pre-calculate price
-        if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
-            foreach ($item['ItemPrices'] as $price_entry) {
-                if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
-                    $raw_price = $price_entry['Price'] ?? 0;
-                    if (is_numeric($raw_price) && $raw_price > 0) {
-                        $price_with_vat = $raw_price * 1.18;
-                        $variation_data['price'] = floor($price_with_vat) . '.9';
+    // PERFORMANCE: Process in smaller chunks to prevent timeouts
+    $chunk_size = 10; // Process 10 variations at a time
+    $item_chunks = array_chunk($items, $chunk_size);
+    $total_chunks = count($item_chunks);
+    
+    error_log("SAP Creator: Processing {$total_chunks} chunks of {$chunk_size} items each");
+    
+    try {
+        foreach ($item_chunks as $chunk_index => $chunk_items) {
+            $chunk_num = $chunk_index + 1;
+            error_log("SAP Creator: Processing chunk {$chunk_num}/{$total_chunks} with " . count($chunk_items) . " items");
+            
+            // Prepare variations data for this chunk
+            $variations_to_create = [];
+            foreach ($chunk_items as $item) {
+                $item_code = $item['ItemCode'] ?? '';
+                $item_name = $item['ItemName'] ?? '';
+                
+                if (empty($item_code)) {
+                    continue;
+                }
+                
+                // Pre-calculate all data
+                $variation_data = [
+                    'item_code' => $item_code,
+                    'item_name' => $item_name,
+                    'item' => $item
+                ];
+                
+                // Pre-calculate price
+                if (isset($item['ItemPrices']) && is_array($item['ItemPrices'])) {
+                    foreach ($item['ItemPrices'] as $price_entry) {
+                        if (isset($price_entry['PriceList']) && $price_entry['PriceList'] === 1) {
+                            $raw_price = $price_entry['Price'] ?? 0;
+                            if (is_numeric($raw_price) && $raw_price > 0) {
+                                $price_with_vat = $raw_price * 1.18;
+                                $variation_data['price'] = floor($price_with_vat) . '.9';
+                            }
+                            break;
+                        }
                     }
-                    break;
                 }
+                
+                // Pre-calculate stock
+                $variation_data['stock'] = 0;
+                if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
+                    foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
+                        if (isset($warehouse_info['InStock']) && is_numeric($warehouse_info['InStock'])) {
+                            $variation_data['stock'] = max(0, (int)$warehouse_info['InStock']);
+                            break;
+                        }
+                    }
+                }
+                
+                // Pre-calculate attributes (OPTIMIZE: Create terms once per chunk)
+                $variation_data['attributes'] = [];
+                if (!empty($item['U_ssize'])) {
+                    $size_value = trim($item['U_ssize']);
+                    $size_slug = sanitize_title($size_value);
+                    sap_ensure_term_exists('pa_size', $size_value, $size_slug);
+                    $variation_data['attributes']['pa_size'] = $size_slug;
+                }
+                if (!empty($item['U_scolor'])) {
+                    $color_value = trim($item['U_scolor']);
+                    $color_slug = sanitize_title($color_value);
+                    sap_ensure_term_exists('pa_color', $color_value, $color_slug);
+                    $variation_data['attributes']['pa_color'] = $color_slug;
+                }
+                
+                $variations_to_create[] = $variation_data;
+            }
+            
+            // Create variations for this chunk
+            foreach ($variations_to_create as $var_data) {
+                try {
+                    // Create variation object with all pre-calculated data
+                    $variation = new WC_Product_Variation();
+                    $variation->set_parent_id($parent_id);
+                    $variation->set_name($var_data['item_name']);
+                    $variation->set_sku($var_data['item_code']);
+                    $variation->set_status('private'); // CRITICAL: Use 'private' status for variations
+                    
+                    // Set pre-calculated price
+                    if (isset($var_data['price'])) {
+                        $variation->set_regular_price($var_data['price']);
+                        $variation->set_price($var_data['price']);
+                    }
+                    
+                    // Set pre-calculated stock
+                    $variation->set_manage_stock(true);
+                    $variation->set_stock_quantity($var_data['stock']);
+                    $variation->set_stock_status($var_data['stock'] > 0 ? 'instock' : 'outofstock');
+                    
+                    // Set pre-calculated attributes
+                    if (!empty($var_data['attributes'])) {
+                        $variation->set_attributes($var_data['attributes']);
+                    }
+                    
+                    // Save variation
+                    $variation_id = $variation->save();
+                    
+                    if ($variation_id) {
+                        $created_count++;
+                        $created_variations[] = [
+                            'variation_id' => $variation_id,
+                            'item_code' => $var_data['item_code']
+                        ];
+                        
+                        // Log every 10th creation to reduce log spam (performance optimization)
+                        if ($created_count % 10 === 0) {
+                            error_log("SAP Creator: BATCH created {$created_count} variations so far...");
+                        }
+                    } else {
+                        error_log("SAP Creator: BATCH failed to create variation for {$var_data['item_code']}");
+                    }
+                } catch (Exception $e) {
+                    error_log("SAP Creator: Exception creating variation for {$var_data['item_code']}: " . $e->getMessage());
+                }
+            }
+            
+            // PERFORMANCE: Clear memory after each chunk
+            unset($variations_to_create);
+            
+            // PERFORMANCE: Brief pause between chunks to prevent server overload
+            if ($chunk_num < $total_chunks) {
+                usleep(100000); // 0.1 second pause
             }
         }
         
-        // Pre-calculate stock
-        $variation_data['stock'] = 0;
-        if (isset($item['ItemWarehouseInfoCollection']) && is_array($item['ItemWarehouseInfoCollection'])) {
-            foreach ($item['ItemWarehouseInfoCollection'] as $warehouse_info) {
-                if (isset($warehouse_info['InStock']) && is_numeric($warehouse_info['InStock'])) {
-                    $variation_data['stock'] = max(0, (int)$warehouse_info['InStock']);
-                    break;
+        error_log("SAP Creator: Completed variation creation - Created: {$created_count} variations");
+        
+        // Batch update SAP with all created variations
+        if (!empty($created_variations)) {
+            error_log("SAP Creator: Starting BATCH SAP updates for " . count($created_variations) . " variations");
+            
+            // Process SAP updates in smaller batches to avoid timeouts
+            $sap_batch_size = 3; // Reduced from 5 to 3 for better reliability
+            $sap_batches = array_chunk($created_variations, $sap_batch_size);
+            
+            foreach ($sap_batches as $batch_index => $batch) {
+                // Log only every 3rd batch to reduce spam (performance optimization)
+                if (($batch_index + 1) % 3 === 0 || $batch_index === 0 || $batch_index === count($sap_batches) - 1) {
+                    error_log("SAP Creator: Processing SAP batch " . ($batch_index + 1) . "/" . count($sap_batches));
                 }
+                
+                foreach ($batch as $created_var) {
+                    try {
+                        $sap_updated = sap_update_item_ids($created_var['item_code'], $parent_id, $created_var['variation_id'], $token);
+                        if (!$sap_updated) {
+                            $sap_update_failed++;
+                        }
+                    } catch (Exception $e) {
+                        // Only log exceptions, not routine collection
+                        if (strpos($e->getMessage(), 'collection') === false) {
+                            error_log("SAP Creator: Exception updating SAP for {$created_var['item_code']}: " . $e->getMessage());
+                        }
+                        $sap_update_failed++;
+                    }
+                }
+                
+                // Brief pause between SAP batches (reduced from 0.2s to 0.1s)
+                usleep(100000); // 0.1 second pause
             }
         }
         
-        // Pre-calculate attributes
-        $variation_data['attributes'] = [];
-        if (!empty($item['U_ssize'])) {
-            $size_value = trim($item['U_ssize']);
-            $size_slug = sanitize_title($size_value);
-            sap_ensure_term_exists('pa_size', $size_value, $size_slug);
-            $variation_data['attributes']['pa_size'] = $size_slug;
-        }
-        if (!empty($item['U_scolor'])) {
-            $color_value = trim($item['U_scolor']);
-            $color_slug = sanitize_title($color_value);
-            sap_ensure_term_exists('pa_color', $color_value, $color_slug);
-            $variation_data['attributes']['pa_color'] = $color_slug;
-        }
-        
-        $variations_to_create[] = $variation_data;
-    }
-    
-    // Create all variations in one batch (much faster)
-    foreach ($variations_to_create as $var_data) {
-        // Create variation object with all pre-calculated data
-        $variation = new WC_Product_Variation();
-        $variation->set_parent_id($parent_id);
-        $variation->set_name($var_data['item_name']);
-        $variation->set_sku($var_data['item_code']);
-        $variation->set_status('private'); // CRITICAL: Use 'private' status for variations
-        
-        // Set pre-calculated price
-        if (isset($var_data['price'])) {
-            $variation->set_regular_price($var_data['price']);
-            $variation->set_price($var_data['price']);
-        }
-        
-        // Set pre-calculated stock
-        $variation->set_manage_stock(true);
-        $variation->set_stock_quantity($var_data['stock']);
-        $variation->set_stock_status($var_data['stock'] > 0 ? 'instock' : 'outofstock');
-        
-        // Set pre-calculated attributes
-        if (!empty($var_data['attributes'])) {
-            $variation->set_attributes($var_data['attributes']);
-        }
-        
-        // Save variation
-        $variation_id = $variation->save();
-        
-        if ($variation_id) {
-            $created_count++;
-            $created_variations[] = [
-                'variation_id' => $variation_id,
-                'item_code' => $var_data['item_code']
-            ];
-            error_log("SAP Creator: BATCH created variation ID {$variation_id} for {$var_data['item_code']}");
-        } else {
-            error_log("SAP Creator: BATCH failed to create variation for {$var_data['item_code']}");
-        }
-    }
-    
-    // Batch update SAP with all created variations (parallel processing)
-    if (!empty($created_variations)) {
-        error_log("SAP Creator: Starting BATCH SAP updates for " . count($created_variations) . " variations");
-        
-        // Process SAP updates in smaller batches to avoid timeouts
-        $sap_batch_size = 5;
-        $sap_batches = array_chunk($created_variations, $sap_batch_size);
-        
-        foreach ($sap_batches as $batch) {
-            foreach ($batch as $created_var) {
-                $sap_updated = sap_update_item_ids($created_var['item_code'], $parent_id, $created_var['variation_id'], $token);
-                if (!$sap_updated) {
-                    $sap_update_failed++;
-                }
-            }
-        }
+    } catch (Exception $e) {
+        error_log("SAP Creator: CRITICAL Exception in batch creation: " . $e->getMessage());
+        return new WP_Error('batch_creation_failed', 'Batch creation failed: ' . $e->getMessage());
     }
     
     error_log("SAP Creator: OPTIMIZED batch creation completed - Created: {$created_count}, SAP Update Failed: {$sap_update_failed}");
@@ -1669,53 +1780,35 @@ function sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id,
  * @return bool True on success, false on failure
  */
 function sap_update_item_ids($item_code, $site_group_id, $site_item_id, $token) {
+    // PERFORMANCE OPTIMIZATION: Collect data instead of real-time SAP updates (like creation_old.php)
+    global $sap_creator_patch_data_collection;
+    
+    // Initialize collection array if not exists
+    if (!isset($sap_creator_patch_data_collection)) {
+        $sap_creator_patch_data_collection = [];
+    }
+    
     // Validate inputs
-    if (empty($item_code) || empty($token)) {
-        error_log("SAP Creator: Invalid parameters for SAP update - ItemCode: {$item_code}");
+    if (empty($item_code)) {
+        error_log("SAP Creator: Invalid ItemCode for data collection");
         return false;
     }
     
-    $update_data = [
-        'U_SiteGroupID' => (string)$site_group_id,
-        'U_SiteItemID' => (string)$site_item_id
+    // Collect the update data for batch processing later
+    $sap_creator_patch_data_collection[] = [
+        'ItemCode' => $item_code,
+        'U_EM_SiteGroupID' => (string)$site_group_id,
+        'U_EM_SiteItemID' => (string)$site_item_id
     ];
     
-    // Use proper PATCH endpoint for individual item updates
-    $endpoint = 'Items/' . urlencode($item_code);
-    
-    error_log("SAP Creator: Attempting PATCH update for {$item_code} to endpoint: {$endpoint}");
-    error_log("SAP Creator: Update data: " . json_encode($update_data));
-    
-    $response = sap_api_patch($endpoint, $update_data, $token);
-    
-    if (is_wp_error($response)) {
-        $error_message = $response->get_error_message();
-        
-        // Handle specific error types
-        if (strpos($error_message, '403') !== false) {
-            error_log("SAP Creator: HTTP 403 (Forbidden) for {$item_code} - Check API permissions and token validity");
-            
-            // Send critical error notification
-            sap_creator_send_critical_error_notification(
-                "HTTP 403 Error",
-                "Failed to update SAP item {$item_code} - Permission denied. Check API credentials and permissions."
-            );
-        } elseif (strpos($error_message, '404') !== false) {
-            error_log("SAP Creator: HTTP 404 (Not Found) for {$item_code} - Item may not exist in SAP");
-        } elseif (strpos($error_message, '405') !== false) {
-            error_log("SAP Creator: HTTP 405 (Method Not Allowed) for {$item_code} - PATCH may not be supported, trying fallback");
-            
-            // Fallback to POST method if PATCH is not supported
-            return sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id, $token);
-        } else {
-            error_log("SAP Creator: Failed to update SAP for {$item_code}: {$error_message}");
-        }
-        
-        return false;
+    // Minimal logging for performance (log every 10th item only)
+    static $update_count = 0;
+    $update_count++;
+    if ($update_count % 10 === 0) {
+        error_log("SAP Creator: Collected {$update_count} SAP updates so far...");
     }
     
-    error_log("SAP Creator: Successfully updated SAP for {$item_code} - GroupID: {$site_group_id}, ItemID: {$site_item_id}");
-    return true;
+    return true; // Always return success for performance
 }
 
 /**
@@ -2057,6 +2150,280 @@ function sap_enqueue_product_creation_task($user_id = null) {
     }
     
     return new WP_Error('no_processor', 'Background processor not available');
+}
+
+/**
+ * PHASE 1: Send creation completion notification
+ *
+ * @param array $creation_stats Creation statistics
+ * @param array $creation_log Success log entries
+ * @param array $error_log Error log entries
+ * @param float $duration Processing duration in seconds
+ * @return bool|WP_Error True on success, WP_Error on failure
+ */
+if (!function_exists('sap_creator_send_creation_completion_notification')) {
+function sap_creator_send_creation_completion_notification($creation_stats, $creation_log, $error_log, $duration) {
+    global $sap_creator_patch_data_collection;
+    
+    $total_simple = $creation_stats['simple_created'] ?? 0;
+    $total_variable = $creation_stats['variable_created'] ?? 0;
+    $total_variations = $creation_stats['variations_created'] ?? 0;
+    $total_products = $total_simple + $total_variable;
+    $sap_items_pending = count($sap_creator_patch_data_collection ?? []);
+    
+    $message = "✅ שלב 1 הושלם: יצירת מוצרים\n\n";
+    $message .= "📊 סיכום יצירה:\n";
+    $message .= "• מוצרים שנוצרו: {$total_products}\n";
+    $message .= "• מוצרים פשוטים: {$total_simple}\n";
+    $message .= "• מוצרים משתנים: {$total_variable}\n";
+    $message .= "• וריאציות: {$total_variations}\n";
+    $message .= "• זמן עיבוד: {$duration} שניות\n\n";
+    
+    if (!empty($error_log)) {
+        $message .= "⚠️ שגיאות: " . count($error_log) . "\n";
+        // Show first 2 errors
+        foreach (array_slice($error_log, 0, 2) as $error) {
+            $message .= "• " . substr($error, 0, 60) . "...\n";
+        }
+        $message .= "\n";
+    }
+    
+    $message .= "🔄 שלב הבא: עדכון {$sap_items_pending} פריטים ב-SAP\n";
+    $message .= "זמן: " . current_time('H:i:s');
+    
+    return sap_creator_send_telegram_message($message);
+}
+}
+
+/**
+ * PHASE 2: Process SAP updates individually (1-2 at a time)
+ *
+ * @param string $token SAP auth token
+ * @return array Results of SAP update process
+ */
+if (!function_exists('sap_creator_process_sap_updates_individually')) {
+function sap_creator_process_sap_updates_individually($token) {
+    global $sap_creator_patch_data_collection;
+    
+    $results = [
+        'total_items' => 0,
+        'successful_updates' => 0,
+        'failed_updates' => 0,
+        'errors' => [],
+        'start_time' => microtime(true)
+    ];
+    
+    if (empty($sap_creator_patch_data_collection)) {
+        echo "<p style='color: orange;'>אין פריטים לעדכון ב-SAP.</p>";
+        return $results;
+    }
+    
+    $results['total_items'] = count($sap_creator_patch_data_collection);
+    echo "<p>מעדכן {$results['total_items']} פריטים ב-SAP (1-2 בכל פעם)...</p>";
+    
+    // Process items 1-2 at a time for reliability
+    $batch_size = 2;
+    $batches = array_chunk($sap_creator_patch_data_collection, $batch_size);
+    $total_batches = count($batches);
+    
+    foreach ($batches as $batch_index => $batch) {
+        $batch_num = $batch_index + 1;
+        echo "<p>מעבד קבוצה {$batch_num}/{$total_batches} (" . count($batch) . " פריטים)...</p>";
+        flush();
+        
+        foreach ($batch as $patch_data) {
+            $item_code = $patch_data['ItemCode'];
+            $site_group_id = $patch_data['U_EM_SiteGroupID'];
+            $site_item_id = $patch_data['U_EM_SiteItemID'];
+            
+            // Prepare update data for SAP
+            $update_data = [
+                'U_SiteGroupID' => (string)$site_group_id,
+                'U_SiteItemID' => (string)$site_item_id
+            ];
+            
+            // Use proper PATCH endpoint for individual item updates
+            $endpoint = 'Items/' . urlencode($item_code);
+            
+            error_log("SAP Creator: PHASE 2 - Updating {$item_code} with GroupID={$site_group_id}, ItemID={$site_item_id}");
+            
+            $response = sap_api_patch($endpoint, $update_data, $token);
+            
+            if (is_wp_error($response)) {
+                $results['failed_updates']++;
+                $error_message = $response->get_error_message();
+                $results['errors'][] = "{$item_code}: {$error_message}";
+                
+                echo "<span style='color: red;'>✗ {$item_code} - {$error_message}</span><br>";
+                error_log("SAP Creator: PHASE 2 FAILED - {$item_code}: {$error_message}");
+                
+                // Try fallback method for critical errors
+                if (strpos($error_message, '405') !== false) {
+                    error_log("SAP Creator: Trying fallback method for {$item_code}");
+                    $fallback_result = sap_update_item_ids_fallback($item_code, $site_group_id, $site_item_id, $token);
+                    if (!is_wp_error($fallback_result)) {
+                        $results['successful_updates']++;
+                        $results['failed_updates']--;
+                        echo "<span style='color: green;'>✓ {$item_code} - הצליח עם שיטה חלופית</span><br>";
+                    }
+                }
+            } else {
+                $results['successful_updates']++;
+                echo "<span style='color: green;'>✓ {$item_code}</span><br>";
+                error_log("SAP Creator: PHASE 2 SUCCESS - {$item_code}");
+            }
+        }
+        
+        // Brief pause between batches (0.5 seconds)
+        if ($batch_num < $total_batches) {
+            echo "<p style='color: #666; font-style: italic;'>המתנה קצרה לפני הקבוצה הבאה...</p>";
+            flush();
+            usleep(500000); // 0.5 second pause
+        }
+    }
+    
+    $results['end_time'] = microtime(true);
+    $results['duration'] = round($results['end_time'] - $results['start_time'], 2);
+    
+    echo "<hr>";
+    echo "<h4>📊 סיכום עדכון SAP:</h4>";
+    echo "<p><strong>סה\"כ פריטים:</strong> {$results['total_items']}</p>";
+    echo "<p><strong>עודכנו בהצלחה:</strong> <span style='color: green;'>{$results['successful_updates']}</span></p>";
+    echo "<p><strong>נכשלו:</strong> <span style='color: red;'>{$results['failed_updates']}</span></p>";
+    echo "<p><strong>זמן עיבוד:</strong> {$results['duration']} שניות</p>";
+    
+    return $results;
+}
+}
+
+/**
+ * PHASE 2: Send SAP update summary notification
+ *
+ * @param array $sap_results SAP update results
+ * @param array $creation_stats Original creation statistics
+ * @return bool|WP_Error True on success, WP_Error on failure
+ */
+if (!function_exists('sap_creator_send_sap_update_summary_notification')) {
+function sap_creator_send_sap_update_summary_notification($sap_results, $creation_stats) {
+    $total_simple = $creation_stats['simple_created'] ?? 0;
+    $total_variable = $creation_stats['variable_created'] ?? 0;
+    $total_variations = $creation_stats['variations_created'] ?? 0;
+    $total_products = $total_simple + $total_variable;
+    
+    $success_rate = $sap_results['total_items'] > 0 ? 
+        round(($sap_results['successful_updates'] / $sap_results['total_items']) * 100, 1) : 0;
+    
+    $status_icon = $sap_results['failed_updates'] === 0 ? "✅" : ($success_rate >= 80 ? "⚠️" : "❌");
+    
+    $message = "{$status_icon} שלב 2 הושלם: עדכון SAP\n\n";
+    $message .= "📊 סיכום כולל:\n";
+    $message .= "• מוצרים שנוצרו: {$total_products}\n";
+    $message .= "• וריאציות: {$total_variations}\n\n";
+    
+    $message .= "🔄 עדכון SAP:\n";
+    $message .= "• סה\"כ פריטים: {$sap_results['total_items']}\n";
+    $message .= "• הצליחו: {$sap_results['successful_updates']}\n";
+    $message .= "• נכשלו: {$sap_results['failed_updates']}\n";
+    $message .= "• אחוז הצלחה: {$success_rate}%\n";
+    $message .= "• זמן עדכון: {$sap_results['duration']} שניות\n\n";
+    
+    if (!empty($sap_results['errors'])) {
+        $message .= "❌ שגיאות עדכון SAP:\n";
+        // Show first 3 errors
+        foreach (array_slice($sap_results['errors'], 0, 3) as $error) {
+            $message .= "• " . substr($error, 0, 50) . "...\n";
+        }
+        if (count($sap_results['errors']) > 3) {
+            $message .= "• ועוד " . (count($sap_results['errors']) - 3) . " שגיאות...\n";
+        }
+        $message .= "\n";
+    }
+    
+    $message .= "🕐 זמן סיום: " . current_time('H:i:s');
+    
+    return sap_creator_send_telegram_message($message);
+}
+}
+
+/**
+ * Output collected SAP PATCH data in tab-separated format (like creation_old.php)
+ * 
+ * @param array $creation_stats Creation statistics
+ * @return void
+ */
+if (!function_exists('sap_creator_output_collected_patch_data')) {
+function sap_creator_output_collected_patch_data($creation_stats = []) {
+    global $sap_creator_patch_data_collection;
+    
+    echo "<hr style='margin: 20px 0;'>";
+    echo "<h3>📊 סיכום יצירת מוצרים ונתונים לעדכון SAP</h3>";
+    
+    // Product creation summary
+    $total_simple = $creation_stats['simple_created'] ?? 0;
+    $total_variable = $creation_stats['variable_created'] ?? 0;
+    $total_variations = $creation_stats['variations_created'] ?? 0;
+    $total_products = $total_simple + $total_variable;
+    $total_items = count($sap_creator_patch_data_collection ?? []);
+    
+    echo "<div style='background: #e7f3ff; padding: 15px; border: 1px solid #b3d9ff; margin: 10px 0;'>";
+    echo "<h4>📈 סטטיסטיקות יצירה:</h4>";
+    echo "<p><strong>סה\"כ מוצרים שנוצרו:</strong> {$total_products}</p>";
+    echo "<p><strong>מוצרים פשוטים:</strong> {$total_simple}</p>";
+    echo "<p><strong>מוצרים משתנים:</strong> {$total_variable}</p>";
+    echo "<p><strong>וריאציות שנוצרו:</strong> {$total_variations}</p>";
+    echo "<p><strong>פריטים לעדכון ב-SAP:</strong> {$total_items}</p>";
+    echo "</div>";
+    
+    if (empty($sap_creator_patch_data_collection)) {
+        echo "<p style='color: orange;'>⚠️ לא נאספו נתונים לעדכון SAP - ייתכן שכל הפריטים כבר היו מעודכנים.</p>";
+        return;
+    }
+    
+    echo "<h4>📋 נתונים שנאספו לעדכון SAP:</h4>";
+    echo "<p>הנתונים הבאים נאספו ומוכנים לעדכון ב-SAP:</p>";
+    
+    // Output in tab-separated format for easy copying
+    echo "<div style='background: #f8f9fa; padding: 15px; border: 1px solid #dee2e6; margin: 10px 0;'>";
+    echo "<h5>📄 פורמט טבלה (להעתקה):</h5>";
+    echo "<pre style='background: #ffffff; padding: 10px; border: 1px solid #ddd; overflow-x: auto; font-family: monospace;'>";
+    echo "ItemCode\tU_EM_SiteItemID\tU_EM_SiteGroupID\n";
+    
+    foreach ($sap_creator_patch_data_collection as $patch_data) {
+        echo $patch_data['ItemCode'] . "\t" . 
+             $patch_data['U_EM_SiteItemID'] . "\t" . 
+             $patch_data['U_EM_SiteGroupID'] . "\n";
+    }
+    
+    echo "</pre>";
+    echo "</div>";
+    
+    // Show first few entries as preview
+    echo "<h5>🔍 תצוגה מקדימה (5 פריטים ראשונים):</h5>";
+    echo "<table style='border-collapse: collapse; width: 100%; margin: 10px 0;'>";
+    echo "<tr style='background: #f1f3f4;'>";
+    echo "<th style='border: 1px solid #ddd; padding: 8px; text-align: right;'>ItemCode</th>";
+    echo "<th style='border: 1px solid #ddd; padding: 8px; text-align: right;'>SiteItemID</th>";
+    echo "<th style='border: 1px solid #ddd; padding: 8px; text-align: right;'>SiteGroupID</th>";
+    echo "</tr>";
+    
+    $preview_items = array_slice($sap_creator_patch_data_collection, 0, 5);
+    foreach ($preview_items as $patch_data) {
+        echo "<tr>";
+        echo "<td style='border: 1px solid #ddd; padding: 8px; text-align: right; font-family: monospace;'>" . esc_html($patch_data['ItemCode']) . "</td>";
+        echo "<td style='border: 1px solid #ddd; padding: 8px; text-align: right; font-family: monospace;'>" . esc_html($patch_data['U_EM_SiteItemID']) . "</td>";
+        echo "<td style='border: 1px solid #ddd; padding: 8px; text-align: right; font-family: monospace;'>" . esc_html($patch_data['U_EM_SiteGroupID']) . "</td>";
+        echo "</tr>";
+    }
+    
+    if (count($sap_creator_patch_data_collection) > 5) {
+        echo "<tr><td colspan='3' style='border: 1px solid #ddd; padding: 8px; text-align: center; font-style: italic;'>... ועוד " . (count($sap_creator_patch_data_collection) - 5) . " פריטים</td></tr>";
+    }
+    
+    echo "</table>";
+    
+    // Performance summary
+    error_log("SAP Creator: Performance Summary - Created {$total_products} products ({$total_simple} simple, {$total_variable} variable), {$total_variations} variations, collected {$total_items} items for SAP update");
+}
 }
 
 
